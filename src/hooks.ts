@@ -18,7 +18,7 @@ const INITIAL_STATUS: Status = {
 export function useLink() {
   const [ports, setPorts] = useState<string[]>([]);
   const [port, setPort] = useState("");
-  const [baudRate, setBaudRate] = useState(115200);
+  const [baudRate, setBaudRate] = useState(1000000);
   const [status, setStatus] = useState<Status>(INITIAL_STATUS);
   const [points, setPoints] = useState<Point[]>([]);
   const [values, setValues] = useState<Record<number, Value>>({});
@@ -97,16 +97,16 @@ export function useLink() {
           return n;
         });
         const pending = pendingControlRef.current;
-        if (
-          pending !== null &&
-          f.ti_name === "C_SC_NA_1" &&
-          f.cot_name === "激活确认" &&
-          f.objects.some((o) => o.ioa === pending)
-        ) {
-          setSelected(pending);
+        if (pending !== null && f.ti_name === "C_SC_NA_1" && f.objects.some((o) => o.ioa === pending)) {
           pendingControlRef.current = null;
           setPendingControl(null);
-          setNotice("收到选择确认，可执行该控制点");
+          if (f.cot === 7) {
+            setSelected(pending);
+            setNotice("收到选择确认，可执行该控制点");
+          } else {
+            setSelected(null);
+            setNotice("选择被对端拒绝：" + f.cot_name);
+          }
         }
       }),
     ]).then((v) => {

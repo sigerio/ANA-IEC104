@@ -42,8 +42,8 @@ fn ti_name(t: u8) -> &'static str {
         _ => "未知 TI",
     }
 }
-fn cot_name(c: u8) -> &'static str {
-    match c & 0x3F {
+fn cot_name(c: u8) -> String {
+    let name = match c & 0x3F {
         1 => "周期",
         2 => "背景扫描",
         3 => "自发",
@@ -59,6 +59,11 @@ fn cot_name(c: u8) -> &'static str {
         46 => "未知 CA",
         47 => "未知 IOA",
         _ => "未知原因",
+    };
+    if c & 0x40 != 0 {
+        format!("否定 {name}")
+    } else {
+        name.into()
     }
 }
 fn quality(v: u8) -> String {
@@ -100,7 +105,7 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
     if f.len() < 6 || f[0] != 0x68 || f.len() != f[1] as usize + 2 {
         return bad("APDU 长度或启动字符无效");
     }
-    if f[2] & 1 == 0 {
+    if f[2] & 1 == 0 && f[4] & 1 == 0 {
         let ns = u16::from_le_bytes([f[2], f[3]]) / 2;
         let nr = u16::from_le_bytes([f[4], f[5]]) / 2;
         if f.len() < 12 {
@@ -199,7 +204,7 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                 quality,
             });
         }
-        ParsedFrame {
+        return ParsedFrame {
             format: "I".into(),
             ti: Some(ti),
             ti_name: ti_name(ti).into(),
@@ -207,14 +212,14 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
             nr: Some(nr),
             vsq: Some(vsq),
             cot: Some(cot),
-            cot_name: cot_name(cot).into(),
+            cot_name: cot_name(cot),
             oa: Some(oa),
             ca: Some(ca),
             objects,
             error,
-        }
-    } else if f[2] & 3 == 1 {
-        ParsedFrame {
+        };
+    } else if f.len() == 6 && f[2] == 1 && f[3] == 0 && f[4] & 1 == 0 {
+        return ParsedFrame {
             format: "S".into(),
             ti: None,
             ti_name: "".into(),
@@ -227,8 +232,8 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
             ca: None,
             objects: vec![],
             error: None,
-        }
-    } else {
+        };
+    } else if f.len() == 6 && f[2] & 3 == 3 && f[3..6] == [0, 0, 0] {
         let n = match f[2] {
             7 => "STARTDT ACT",
             11 => "STARTDT CON",
@@ -238,7 +243,7 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
             131 => "TESTFR CON",
             _ => "未知 U 命令",
         };
-        ParsedFrame {
+        return ParsedFrame {
             format: "U".into(),
             ti: None,
             ti_name: n.into(),
@@ -255,8 +260,9 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
             } else {
                 None
             },
-        }
+        };
     }
+    bad("APCI 控制域无效")
 }
 pub fn u(cmd: u8) -> Vec<u8> {
     vec![0x68, 4, cmd, 0, 0, 0]
@@ -314,6 +320,26 @@ mod tests {
         let u = parse(&[0x68, 4, 0x0b, 0, 0, 0]);
         assert_eq!(u.format, "U");
         assert_eq!(u.ti_name, "STARTDT CON");
+    }
+
+    #[test]
+    fn rejects_invalid_apci_control_fields() {
+        assert!(parse(&[0x68, 4, 1, 1, 0, 0]).error.is_some());
+        assert!(parse(&[0x68, 4, 7, 1, 0, 0]).error.is_some());
+        assert!(
+            parse(&[0x68, 0x0e, 0, 0, 1, 0, 0x64, 1, 6, 0, 1, 0, 0, 0, 0, 0x14])
+                .error
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn labels_negative_confirmation() {
+        let p = parse(&[
+            0x68, 0x0e, 0, 0, 0, 0, 0x2d, 1, 0x47, 0, 1, 0, 0, 2, 0, 0x81,
+        ]);
+        assert_eq!(p.cot, Some(0x47));
+        assert_eq!(p.cot_name, "否定 激活确认");
     }
     #[test]
     fn rejects_bad_length() {

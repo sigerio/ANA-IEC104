@@ -77,7 +77,17 @@ impl Protocol {
         self.i_deadline = None;
         self.test_deadline = None;
         self.unacknowledged = 0;
+        // 会话复位即序号归零:下次 STARTDT 重新从 0 计数。
+        self.ns = 0;
+        self.nr = 0;
+        self.expected_rx_ns = 0;
+        self.peer_nr = 0;
         self.last_activity = Instant::now();
+    }
+    fn stop(&mut self, now: Instant) {
+        self.idle();
+        self.state = ProtocolState::WaitingStop;
+        self.deadline = Some(now + T0);
     }
     fn acknowledge(&mut self, nr: u16) -> Result<(), String> {
         let advanced = (nr + 32_768 - self.peer_nr) % 32_768;
@@ -276,20 +286,20 @@ fn protocol_tick(protocol: &mut Protocol, now: Instant) -> (Option<Vec<u8>>, Opt
         return (None, Some(message.into()));
     }
     if protocol.i_deadline.is_some_and(|deadline| now >= deadline) {
-        protocol.idle();
+        protocol.stop(now);
         return (
-            None,
-            Some("业务帧确认超时；会话已复位，串口仍保持打开".into()),
+            Some(iec104::u(0x13)),
+            Some("业务帧确认超时；已发送 STOPDT ACT 复位会话".into()),
         );
     }
     if protocol
         .test_deadline
         .is_some_and(|deadline| now >= deadline)
     {
-        protocol.idle();
+        protocol.stop(now);
         return (
-            None,
-            Some("TESTFR 链路测试超时；会话已复位，串口仍保持打开".into()),
+            Some(iec104::u(0x13)),
+            Some("TESTFR 链路测试超时；已发送 STOPDT ACT 复位会话".into()),
         );
     }
     if protocol.state.started()
@@ -311,7 +321,7 @@ fn receive_frame(
     connection: &Connection,
     parsed: iec104::ParsedFrame,
 ) -> bool {
-    if parsed.error.is_some() {
+    if parsed.error.is_some() && parsed.format != "I" {
         return true;
     }
     let mut reply = None;
@@ -326,15 +336,18 @@ fn receive_frame(
                 } else if let Some(ns) = parsed.ns {
                     if let Some(nr) = parsed.nr {
                         if let Err(error) = protocol.acknowledge(nr) {
-                            protocol.idle();
-                            notice = Some(error);
+                            protocol.stop(Instant::now());
+                            reply = Some(iec104::u(0x13));
+                            notice = Some(format!("{error}；已发送 STOPDT ACT 复位会话"));
                         }
                     }
                     if notice.is_none() {
                         if ns != protocol.expected_rx_ns {
+                            let expected = protocol.expected_rx_ns;
+                            protocol.stop(Instant::now());
+                            reply = Some(iec104::u(0x13));
                             notice = Some(format!(
-                                "接收序号异常：期望 N(S)={}，收到 {ns}",
-                                protocol.expected_rx_ns
+                                "接收序号异常：期望 N(S)={expected}，收到 {ns}；已发送 STOPDT ACT 复位会话"
                             ));
                         } else {
                             protocol.expected_rx_ns = (protocol.expected_rx_ns + 1) % 32_768;
@@ -347,8 +360,9 @@ fn receive_frame(
             "S" => {
                 if let Some(nr) = parsed.nr {
                     if let Err(error) = protocol.acknowledge(nr) {
-                        protocol.idle();
-                        notice = Some(error);
+                        protocol.stop(Instant::now());
+                        reply = Some(iec104::u(0x13));
+                        notice = Some(format!("{error}；已发送 STOPDT ACT 复位会话"));
                     }
                 }
             }
@@ -422,7 +436,8 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                 Ok(count) => {
                     pending.extend_from_slice(&bytes[..count]);
                     // ponytail: 用起始索引避免 remove(0) 的 O(n) 前移;洪泛时再换 VecDeque。
-                    let mut start = 0;
+                    let mut start = 0; // 已消费字节数(垃圾 + 完整帧)
+                    let mut junk_end = 0; // 仅垃圾字节(非 0x68 / 非法长度)的末尾,完整帧不算
                     loop {
                         let buf = &pending[start..];
                         if buf.is_empty() {
@@ -430,6 +445,7 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                         }
                         if buf[0] != 0x68 {
                             start += 1;
+                            junk_end = start;
                             continue;
                         }
                         if buf.len() < 2 {
@@ -438,6 +454,7 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                         let length = buf[1] as usize;
                         if !(4..=253).contains(&length) {
                             start += 1;
+                            junk_end = start;
                             emit_status(&app, Some(&connection), Some("收到非法 APDU 长度".into()));
                             continue;
                         }
@@ -452,13 +469,13 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                             return;
                         }
                     }
-                    // 未凑成完整 104 帧的前导字节也显示为原始 RX,便于未建立会话时观察串口数据。
-                    if start > 0 {
+                    // 只把真正的垃圾前导字节(未凑成帧、非 0x68)显示为原始 RX;完整帧不重复发。
+                    if junk_end > 0 {
                         let _ = app.emit(
                             "raw-message",
                             RawMessage {
                                 direction: "RX",
-                                hex: hex(&pending[..start]),
+                                hex: hex(&pending[..junk_end]),
                                 timestamp: timestamp(),
                             },
                         );
@@ -603,8 +620,7 @@ fn stop(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
         if protocol.state != ProtocolState::Started {
             return Err("IEC104 主从通信尚未建立".into());
         }
-        protocol.state = ProtocolState::WaitingStop;
-        protocol.deadline = Some(Instant::now() + T0);
+        protocol.stop(Instant::now());
     }
     write_or_disconnect(&app, &state.connection, &connection, iec104::u(0x13))?;
     emit_status(
@@ -617,7 +633,11 @@ fn stop(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
 
 fn send_i(app: &AppHandle, state: &State<'_, AppState>, asdu: Vec<u8>) -> Result<(), String> {
     let connection = current_connection(state)?;
-    let frame = {
+    let result: Result<(), String> = (|| {
+        let mut port = connection
+            .writer
+            .lock()
+            .map_err(|_| "串口锁异常".to_string())?;
         let mut protocol = connection.protocol.lock().unwrap();
         if !protocol.state.started() {
             return Err("请先建立 IEC104 主从通信".into());
@@ -631,9 +651,17 @@ fn send_i(app: &AppHandle, state: &State<'_, AppState>, asdu: Vec<u8>) -> Result
         if protocol.unacknowledged == 1 {
             protocol.i_deadline = Some(Instant::now() + T1);
         }
-        frame
-    };
-    write_or_disconnect(app, &state.connection, &connection, frame)?;
+        port.write_all(&frame)
+            .map_err(|e| format!("串口写入失败：{e}"))?;
+        port.flush().map_err(|e| format!("串口发送失败：{e}"))?;
+        protocol.last_activity = Instant::now();
+        emit_frame(app, "TX", &frame);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        physical_failure(app, &state.connection, &connection.writer, error.clone());
+        return Err(error);
+    }
     emit_status(app, Some(&connection), None);
     Ok(())
 }
@@ -668,7 +696,7 @@ fn adjust(
 ) -> Result<(), String> {
     if adjust_value_is_invalid(ioa, value, preset, cancel) {
         return Err(
-            "遥调参数无效：数值须有限；模式控制须为 0 到 65535 的整数；预置与取消不可同时选择"
+            "遥调参数无效：普通参数须在 -3276.8 到 3276.7；模式控制须为 0 到 32767 的整数；预置与取消不可同时选择"
                 .into(),
         );
     }
@@ -685,7 +713,8 @@ fn adjust(
 fn adjust_value_is_invalid(ioa: u32, value: f32, preset: bool, cancel: bool) -> bool {
     !value.is_finite()
         || (preset && cancel)
-        || (ioa == 0x300c && (value < 0.0 || value > u16::MAX as f32 || value.fract() != 0.0))
+        || (ioa == 0x300c && (value < 0.0 || value > i16::MAX as f32 || value.fract() != 0.0))
+        || (ioa != 0x300c && !(-3276.8..=3276.7).contains(&value))
 }
 
 pub fn run() {
@@ -714,7 +743,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_timeouts_reset_only_the_protocol_state() {
+    fn session_timeouts_send_stopdt_before_resetting() {
         let now = Instant::now();
         let mut protocol = Protocol::new();
         protocol.state = ProtocolState::WaitingStart;
@@ -726,17 +755,47 @@ mod tests {
         assert_eq!(protocol.state, ProtocolState::Idle);
 
         protocol.state = ProtocolState::Started;
+        protocol.i_deadline = Some(now - Duration::from_secs(1));
+        assert_eq!(protocol_tick(&mut protocol, now).0, Some(iec104::u(0x13)));
+        assert_eq!(protocol.state, ProtocolState::WaitingStop);
+
+        protocol = Protocol::new();
+        protocol.state = ProtocolState::Started;
         protocol.last_activity = now - T3;
         assert_eq!(protocol_tick(&mut protocol, now).0, Some(iec104::u(0x43)));
         assert_eq!(protocol.state, ProtocolState::Started);
     }
 
     #[test]
+    fn stop_resets_all_sequences_before_sending_stopdt() {
+        let now = Instant::now();
+        let mut protocol = Protocol::new();
+        protocol.state = ProtocolState::Started;
+        protocol.ns = 4;
+        protocol.nr = 3;
+        protocol.expected_rx_ns = 3;
+        protocol.peer_nr = 2;
+        protocol.unacknowledged = 2;
+
+        protocol.stop(now);
+
+        assert_eq!(protocol.state, ProtocolState::WaitingStop);
+        assert_eq!(protocol.ns, 0);
+        assert_eq!(protocol.nr, 0);
+        assert_eq!(protocol.expected_rx_ns, 0);
+        assert_eq!(protocol.peer_nr, 0);
+        assert_eq!(protocol.unacknowledged, 0);
+    }
+
+    #[test]
     fn rejects_invalid_adjust_values() {
         assert!(adjust_value_is_invalid(0x300c, 1.5, true, false));
         assert!(adjust_value_is_invalid(0x300c, -1.0, true, false));
+        assert!(adjust_value_is_invalid(0x300c, 32768.0, true, false));
+        assert!(adjust_value_is_invalid(0x3000, 3276.8, true, false));
         assert!(adjust_value_is_invalid(0x300c, 1.0, true, true));
         assert!(!adjust_value_is_invalid(0x300c, 1.0, true, false));
+        assert!(!adjust_value_is_invalid(0x3000, -3276.8, true, false));
     }
 
     #[test]

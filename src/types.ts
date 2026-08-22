@@ -7,6 +7,7 @@ export type Frame = {
   ti_name: string;
   ns: number | null;
   nr: number | null;
+  cot: number | null;
   cot_name: string;
   objects: Obj[];
   error: string | null;
