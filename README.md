@@ -1,18 +1,23 @@
 # ANA-IEC104
 
-本机 IEC 60870-5-104（IEC104）协议上位机工具。
+React + Vite + Tauri 2 + Rust 实现的 IEC 60870-5-104 串口主站。
 
-## 简介
+## 当前范围
 
-用于实现基于 TCP/IP（默认端口 2404）的 IEC104 规约通信，进行电力自动化系统的数据采集与调试。
+- 物理链路：USART，可调波特率，8N1 / 无校验 / 无流控。
+- 承载：协议文档定义的 APDU 串行字节流，不使用 TCP/2404。
+- 监控：连接状态、STARTDT/STOPDT 状态、N(S)/N(R)、原始 RX/TX 十六进制消息、I/S/U 与 ASDU 字段解析、全量遥信/遥测实时值和品质。
+- 控制：站总召唤、4 个单点遥控、13 个遥调参数的预置、固化与取消。
 
-## 状态
+## 开发检查
 
-🚧 规划中，尚未开始实现。
+    npm install
+    npm run check
+    npm run build
+    cargo test --manifest-path src-tauri/Cargo.toml --offline
 
-## 规划
+## Windows x64 构建
 
-- [ ] 确定技术栈与开发语言
-- [ ] 确定上位机角色（主站 / 子站）
-- [ ] 协议栈实现（APCI / ASDU 解析）
-- [ ] 点表配置与数据展示
+    npm run build:win
+
+WSL2 使用 cargo-xwin 和 x86_64-pc-windows-msvc 目标。运行 Windows 程序需要 WebView2 Runtime；现场串口使用实际 COMx。真实设备联调仍需在 Windows 上连接 USART 或 USB 转串口设备验证。

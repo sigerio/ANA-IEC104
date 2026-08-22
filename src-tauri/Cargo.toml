@@ -1,0 +1,17 @@
+[package]
+name = "ana-iec104"
+version = "0.1.0"
+description = "Serial IEC 60870-5-104 master station"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serialport = { version = "4", default-features = false }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
