@@ -4,11 +4,11 @@ import type { Link } from "../hooks";
 
 export function TelemetryTable({ link }: { link: Link }) {
   const { points, values } = link;
-  const telemetry = useMemo(() => points.filter((p) => p.kind === "遥信" || p.kind === "遥测"), [points]);
+  const telemetry = useMemo(() => points.filter((p) => p.kind === "遥信" || p.kind === "遥测" || p.kind === "遥调"), [points]);
   return (
     <article className="points">
       <div className="title">
-        <h2>实时遥信与遥测</h2>
+        <h2>实时遥信、遥测与遥调参数</h2>
         <b>{telemetry.length} 点</b>
       </div>
       <div className="table">

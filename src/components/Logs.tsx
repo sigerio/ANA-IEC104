@@ -1,10 +1,18 @@
+import { useRef, useState } from "react";
 import { showIoa } from "../format";
 import type { Link } from "../hooks";
+import { Splitter } from "./Splitter";
 
 export function Logs({ link }: { link: Link }) {
   const { raw, frames, status } = link;
+  const container = useRef<HTMLElement>(null);
+  const [split, setSplit] = useState(50);
   return (
-    <section className="bottom">
+    <section
+      className="bottom"
+      ref={container}
+      style={{ gridTemplateColumns: `minmax(0, ${split}fr) 8px minmax(0, ${100 - split}fr)` }}
+    >
       <article>
         <div className="title">
           <h2>原始通信消息</h2>
@@ -24,6 +32,14 @@ export function Logs({ link }: { link: Link }) {
           )}
         </div>
       </article>
+      <Splitter
+        container={container}
+        orientation="vertical"
+        value={split}
+        initial={50}
+        label="调整原始消息与协议解析区域宽度"
+        onChange={setSplit}
+      />
       <article>
         <div className="title">
           <h2>协议解析</h2>

@@ -671,6 +671,10 @@ fn general_interrogation(app: AppHandle, state: State<'_, AppState>) -> Result<(
     send_i(&app, &state, iec104::asdu(0x64, 0, vec![0x14]))
 }
 
+fn control_ioa_is_valid(ioa: u32) -> bool {
+    matches!(ioa, 0x200 | 0x201 | 0x210 | 0x211 | 0x222 | 0x223)
+}
+
 #[tauri::command]
 fn control(
     app: AppHandle,
@@ -678,6 +682,9 @@ fn control(
     ioa: u32,
     select: bool,
 ) -> Result<(), String> {
+    if !control_ioa_is_valid(ioa) {
+        return Err("不支持的遥控点".into());
+    }
     send_i(
         &app,
         &state,
@@ -796,6 +803,13 @@ mod tests {
         assert!(adjust_value_is_invalid(0x300c, 1.0, true, true));
         assert!(!adjust_value_is_invalid(0x300c, 1.0, true, false));
         assert!(!adjust_value_is_invalid(0x3000, -3276.8, true, false));
+    }
+
+    #[test]
+    fn accepts_only_configured_control_points() {
+        assert!(control_ioa_is_valid(0x222));
+        assert!(!control_ioa_is_valid(0x220));
+        assert!(!control_ioa_is_valid(0x224));
     }
 
     #[test]
