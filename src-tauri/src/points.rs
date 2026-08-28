@@ -80,6 +80,10 @@ pub fn all() -> Vec<PointDef> {
         (0x00300A, "空调湿度告警阈值", "遥调", "%RH"),
         (0x00300B, "空调湿度校准值", "遥调", "%RH"),
         (0x00300C, "空调模式控制", "遥调", "整数"),
+        (0x00300D, "温度校正", "遥调", "°C"),
+        (0x00300E, "湿度校正", "遥调", "%RH"),
+        (0x00300F, "风速校正", "遥调", "m/s"),
+        (0x003010, "风向校正", "遥调", "°"),
     ]
     .into_iter()
     .map(|(ioa, name, kind, unit)| PointDef {
@@ -98,6 +102,13 @@ mod tests {
     #[test]
     fn includes_configured_controls() {
         let points = all();
+        assert_eq!(
+            points
+                .iter()
+                .filter(|point| matches!(point.kind, "遥测" | "遥调"))
+                .count(),
+            32
+        );
         assert!(points
             .iter()
             .any(|point| point.ioa == 0x000013 && point.kind == "遥信"));
@@ -110,9 +121,11 @@ mod tests {
         assert!(points
             .iter()
             .any(|point| point.ioa == 0x000222 && point.kind == "遥控"));
-        assert!(!points.iter().any(|point| matches!(
-            point.ioa,
-            0x000224 | 0x000225
-        )));
+        assert!(points
+            .iter()
+            .any(|point| point.ioa == 0x003010 && point.name == "风向校正"));
+        assert!(!points
+            .iter()
+            .any(|point| matches!(point.ioa, 0x000224 | 0x000225)));
     }
 }

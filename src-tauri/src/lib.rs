@@ -672,7 +672,10 @@ fn general_interrogation(app: AppHandle, state: State<'_, AppState>) -> Result<(
 }
 
 fn control_ioa_is_valid(ioa: u32) -> bool {
-    matches!(ioa, 0x200 | 0x201 | 0x210 | 0x211 | 0x220 | 0x221 | 0x222 | 0x223)
+    matches!(
+        ioa,
+        0x200 | 0x201 | 0x210 | 0x211 | 0x220 | 0x221 | 0x222 | 0x223
+    )
 }
 
 #[tauri::command]
@@ -703,7 +706,7 @@ fn adjust(
 ) -> Result<(), String> {
     if adjust_value_is_invalid(ioa, value, preset, cancel) {
         return Err(
-            "遥调参数无效：普通参数须在 -3276.8 到 3276.7；模式控制须为 0 到 32767 的整数；预置与取消不可同时选择"
+            "遥调参数无效：空调参数须在 -3276.8 到 3276.7；模式控制须为 0 到 3 的整数；校正参数须在 -10 到 10 且步进 0.01；预置与取消不可同时选择"
                 .into(),
         );
     }
@@ -718,10 +721,15 @@ fn adjust(
 }
 
 fn adjust_value_is_invalid(ioa: u32, value: f32, preset: bool, cancel: bool) -> bool {
+    let calibration = (0x300d..=0x3010).contains(&ioa);
     !value.is_finite()
+        || !(0x3000..=0x3010).contains(&ioa)
         || (preset && cancel)
-        || (ioa == 0x300c && (value < 0.0 || value > i16::MAX as f32 || value.fract() != 0.0))
-        || (ioa != 0x300c && !(-3276.8..=3276.7).contains(&value))
+        || (ioa == 0x300c && (value < 0.0 || value > 3.0 || value.fract() != 0.0))
+        || (calibration
+            && (!(-10.0..=10.0).contains(&value)
+                || ((value * 100.0).round() - value * 100.0).abs() > 0.0001))
+        || (!calibration && ioa != 0x300c && !(-3276.8..=3276.7).contains(&value))
 }
 
 pub fn run() {
@@ -798,11 +806,16 @@ mod tests {
     fn rejects_invalid_adjust_values() {
         assert!(adjust_value_is_invalid(0x300c, 1.5, true, false));
         assert!(adjust_value_is_invalid(0x300c, -1.0, true, false));
-        assert!(adjust_value_is_invalid(0x300c, 32768.0, true, false));
+        assert!(adjust_value_is_invalid(0x300c, 4.0, true, false));
         assert!(adjust_value_is_invalid(0x3000, 3276.8, true, false));
+        assert!(adjust_value_is_invalid(0x300d, 10.01, true, false));
+        assert!(adjust_value_is_invalid(0x300d, 1.234, true, false));
+        assert!(adjust_value_is_invalid(0x3011, 1.0, true, false));
         assert!(adjust_value_is_invalid(0x300c, 1.0, true, true));
         assert!(!adjust_value_is_invalid(0x300c, 1.0, true, false));
         assert!(!adjust_value_is_invalid(0x3000, -3276.8, true, false));
+        assert!(!adjust_value_is_invalid(0x300d, -10.0, true, false));
+        assert!(!adjust_value_is_invalid(0x3010, 1.25, true, false));
     }
 
     #[test]

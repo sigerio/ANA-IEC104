@@ -61,9 +61,13 @@ fn adjust_float(
     preset: bool,
     cancel: bool,
 ) -> Result<Vec<u8>, &'static str> {
-    if !(0x3000..=0x300b).contains(&ioa)
+    let calibration = (0x300d..=0x3010).contains(&ioa);
+    if !(0x3000..=0x300b).contains(&ioa) && !calibration
         || !value.is_finite()
-        || !(-3276.8..=3276.7).contains(&value)
+        || (calibration
+            && (!(-10.0..=10.0).contains(&value)
+                || ((value * 100.0).round() - value * 100.0).abs() > 0.0001))
+        || (!calibration && !(-3276.8..=3276.7).contains(&value))
         || (preset && cancel)
     {
         return Err("invalid float adjustment");
@@ -80,7 +84,7 @@ fn adjust_mode(
     preset: bool,
     cancel: bool,
 ) -> Result<Vec<u8>, &'static str> {
-    if value > i16::MAX as u16 || (preset && cancel) {
+    if value > 3 || (preset && cancel) {
         return Err("invalid mode adjustment");
     }
     let mut data = vec![(preset as u8) | ((cancel as u8) << 1)];
@@ -116,6 +120,10 @@ fn main() {
     assert_eq!(
         hex(&adjust_float(0, 0, 0x3000, 25.0, true, false).unwrap()),
         "68 12 00 00 00 00 CA 01 06 00 01 00 00 30 00 01 00 00 C8 41"
+    );
+    assert_eq!(
+        hex(&adjust_float(0, 0, 0x300d, 1.25, true, false).unwrap()),
+        "68 12 00 00 00 00 CA 01 06 00 01 00 0D 30 00 01 00 00 A0 3F"
     );
     assert_eq!(
         hex(&adjust_mode(0, 0, 2, true, false).unwrap()),
