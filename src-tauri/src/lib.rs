@@ -672,7 +672,7 @@ fn general_interrogation(app: AppHandle, state: State<'_, AppState>) -> Result<(
 }
 
 fn control_ioa_is_valid(ioa: u32) -> bool {
-    matches!(ioa, 0x200 | 0x201 | 0x210 | 0x211 | 0x222 | 0x223)
+    matches!(ioa, 0x200 | 0x201 | 0x210 | 0x211 | 0x220 | 0x221 | 0x222 | 0x223)
 }
 
 #[tauri::command]
@@ -807,8 +807,9 @@ mod tests {
 
     #[test]
     fn accepts_only_configured_control_points() {
+        assert!(control_ioa_is_valid(0x220));
+        assert!(control_ioa_is_valid(0x221));
         assert!(control_ioa_is_valid(0x222));
-        assert!(!control_ioa_is_valid(0x220));
         assert!(!control_ioa_is_valid(0x224));
     }
 

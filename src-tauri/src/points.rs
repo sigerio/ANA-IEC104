@@ -27,6 +27,8 @@ pub fn all() -> Vec<PointDef> {
         (0x000201, "关闭门", "遥控", ""),
         (0x000210, "伸出停机坪", "遥控", ""),
         (0x000211, "缩回停机坪", "遥控", ""),
+        (0x000220, "空调监控开机", "遥控", ""),
+        (0x000221, "空调监控关机", "遥控", ""),
         (0x000222, "打开内部照明", "遥控", ""),
         (0x000223, "关闭内部照明", "遥控", ""),
         (0x001000, "温湿度传感器在线", "遥信", ""),
@@ -94,17 +96,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn includes_only_supported_light_controls() {
+    fn includes_configured_controls() {
         let points = all();
         assert!(points
             .iter()
             .any(|point| point.ioa == 0x000013 && point.kind == "遥信"));
         assert!(points
             .iter()
+            .any(|point| point.ioa == 0x000220 && point.name == "空调监控开机"));
+        assert!(points
+            .iter()
+            .any(|point| point.ioa == 0x000221 && point.name == "空调监控关机"));
+        assert!(points
+            .iter()
             .any(|point| point.ioa == 0x000222 && point.kind == "遥控"));
         assert!(!points.iter().any(|point| matches!(
             point.ioa,
-            0x000220 | 0x000221 | 0x000224 | 0x000225
+            0x000224 | 0x000225
         )));
     }
 }
