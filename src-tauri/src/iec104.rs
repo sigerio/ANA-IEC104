@@ -174,10 +174,25 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                     .into(),
                     quality(d[0]),
                 ),
-                13 => (
-                    format!("{:.3}", f32::from_le_bytes(d[..4].try_into().unwrap())),
-                    quality(d[4]),
-                ),
+                13 => {
+                    let value = f32::from_le_bytes(d[..4].try_into().unwrap());
+                    let mut q = quality(d[4]);
+                    if d[4] & 1 != 0 {
+                        q = if q == "正常" {
+                            "OV".into()
+                        } else {
+                            format!("OV|{q}")
+                        };
+                    }
+                    if !value.is_finite() {
+                        q = if q == "正常" {
+                            "IV".into()
+                        } else {
+                            format!("IV|{q}")
+                        };
+                    }
+                    (format!("{value:.3}"), q)
+                }
                 0x2d => (
                     format!(
                         "{} {}",
@@ -203,6 +218,9 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                 raw: hex(d),
                 quality,
             });
+        }
+        if error.is_none() && (count == 0 || pos != f.len()) {
+            error = Some("ASDU 对象数量与长度不匹配".into());
         }
         return ParsedFrame {
             format: "I".into(),
@@ -341,6 +359,18 @@ mod tests {
         assert_eq!(p.cot, Some(0x47));
         assert_eq!(p.cot_name, "否定 激活确认");
     }
+    #[test]
+    fn rejects_trailing_objects_and_marks_invalid_measurements() {
+        let mut asdu = asdu(1, 0x17, vec![1, 0]);
+        asdu[2] = 3;
+        assert!(parse(&i(0, 0, asdu)).error.is_some());
+        let mut data = f32::NAN.to_le_bytes().to_vec();
+        data.push(1);
+        let parsed = parse(&i(0, 0, super::asdu(13, 0x2000, data)));
+        assert!(parsed.objects[0].quality.contains("IV"));
+        assert!(parsed.objects[0].quality.contains("OV"));
+    }
+
     #[test]
     fn rejects_bad_length() {
         assert!(parse(&[0x68, 4, 7, 0, 0, 0, 0]).error.is_some());

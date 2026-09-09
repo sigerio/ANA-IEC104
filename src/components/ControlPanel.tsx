@@ -1,59 +1,245 @@
-import { useMemo } from "react";
-import { showIoa } from "../format";
+import { useState } from "react";
+import { adjustmentError, isUsable, pointValue, showIoa } from "../format";
 import type { Link } from "../hooks";
 
+const GROUPS = [
+  { title: "门控制", note: "打开 / 关闭", ioas: [0x200, 0x201] },
+  { title: "门加热解冻", note: "使能 / 关闭", ioas: [0x224, 0x225] },
+  { title: "停机坪", note: "伸出 / 收回", ioas: [0x210, 0x211] },
+  { title: "内部照明", note: "打开 / 关闭", ioas: [0x222, 0x223] },
+  { title: "空调电源", note: "监控开机 / 关机", ioas: [0x220, 0x221] },
+];
+
 export function ControlPanel({ link }: { link: Link }) {
-  const { points, status, selected, adjustments, setAdjustments, control, adjust } = link;
-  const controls = useMemo(() => points.filter((p) => p.kind === "遥控"), [points]);
-  const tuning = useMemo(() => points.filter((p) => p.kind === "遥调"), [points]);
+  const {
+    points,
+    values,
+    status,
+    selected,
+    adjustments,
+    setAdjustments,
+    control,
+    adjust,
+    pending,
+    presets,
+    busy,
+    ready,
+  } = link;
+  const [tab, setTab] = useState("设备控制");
+  const disabled = !ready || !status.started || busy || !!pending;
   return (
-    <aside className="commands">
-      <div className="title">
-        <h2>控制下发</h2>
+    <aside className="commands panel">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">COMMAND CENTER</span>
+          <h2>操作中心</h2>
+        </div>
+        <span className={`status compact ${status.started ? "ok" : ""}`}>
+          <i />
+          {status.started ? "可操作" : "未就绪"}
+        </span>
       </div>
-      <section>
-        <h3>单点遥控</h3>
-        {controls.map((p) => (
-          <div className="command" key={p.ioa}>
-            <div>
-              <b>{p.name}</b>
-              <small>{showIoa(p.ioa)}</small>
+      <div className="control-tabs tabs">
+        {["设备控制", "参数设置"].map((name) => (
+          <button
+            key={name}
+            aria-pressed={tab === name}
+            className={tab === name ? "active" : ""}
+            onClick={() => setTab(name)}
+          >
+            {name}
+            <span>{name === "设备控制" ? "10" : "17"}</span>
+          </button>
+        ))}
+      </div>
+      <div className="command-scroll">
+        {tab === "设备控制" ? (
+          <>
+            <div className="operation-help">
+              <span>01 选择</span>
+              <b>→</b>
+              <span>02 等待确认</span>
+              <b>→</b>
+              <span>03 执行</span>
             </div>
-            <button disabled={!status.started} onClick={() => control(p.ioa, true)}>
-              选择
-            </button>
-            <button className="execute" disabled={!status.started || selected !== p.ioa} onClick={() => control(p.ioa, false)}>
-              执行
-            </button>
-          </div>
-        ))}
-      </section>
-      <section>
-        <h3>遥调参数</h3>
-        {tuning.map((p) => (
-          <div className="adjust" key={p.ioa}>
-            <label>
-              {p.name}
-              <small>
-                {showIoa(p.ioa)} · {p.unit || "浮点数"}
-              </small>
-            </label>
-            <input
-              value={adjustments[p.ioa] || ""}
-              onChange={(e) => setAdjustments((a) => ({ ...a, [p.ioa]: e.target.value }))}
-            />
-            <button disabled={!status.started || !adjustments[p.ioa]} onClick={() => adjust(p.ioa, true, false)}>
-              预置
-            </button>
-            <button disabled={!status.started || !adjustments[p.ioa]} onClick={() => adjust(p.ioa, false, false)}>
-              固化
-            </button>
-            <button disabled={!status.started || !adjustments[p.ioa]} onClick={() => adjust(p.ioa, false, true)}>
-              取消
-            </button>
-          </div>
-        ))}
-      </section>
+            {GROUPS.map((group) => (
+              <section className="control-group" key={group.title}>
+                <div className="group-heading">
+                  <h3>{group.title}</h3>
+                  <span>{group.note}</span>
+                </div>
+                {group.ioas.map((ioa) => {
+                  const point = points.find((p) => p.ioa === ioa);
+                  if (!point) return null;
+                  const waiting = pending?.ioa === ioa;
+                  return (
+                    <div
+                      className={`command ${selected === ioa ? "selected-command" : ""}`}
+                      key={ioa}
+                    >
+                      <div>
+                        <b>{point.name}</b>
+                        <small>
+                          {waiting
+                            ? `等待${pending.action}确认…`
+                            : selected === ioa
+                              ? "已确认选择 · 可执行"
+                              : showIoa(ioa)}
+                        </small>
+                      </div>
+                      <button
+                        disabled={disabled}
+                        onClick={() => control(ioa, true)}
+                      >
+                        {selected === ioa ? "已选择" : "选择"}
+                      </button>
+                      <button
+                        className="execute"
+                        disabled={disabled || selected !== ioa}
+                        onClick={() => control(ioa, false)}
+                      >
+                        执行
+                      </button>
+                    </div>
+                  );
+                })}
+              </section>
+            ))}
+          </>
+        ) : (
+          <>
+            <p className="parameter-help">
+              预置获得设备确认后才能固化。固化后请总召核对回传值。
+            </p>
+            {points
+              .filter((p) => p.kind === "遥调")
+              .map((point) => {
+                const input = adjustments[point.ioa] || "";
+                const validation = adjustmentError(point.ioa, input);
+                const confirmed = presets[point.ioa] !== undefined;
+                const matchesPreset =
+                  confirmed &&
+                  presets[point.ioa] === Number(input) &&
+                  !validation;
+                const step =
+                  point.ioa >= 0x300d
+                    ? 0.01
+                    : [0x300b, 0x300c].includes(point.ioa)
+                      ? 1
+                      : 0.1;
+                return (
+                  <section className="adjust" key={point.ioa}>
+                    <div className="adjust-heading">
+                      <label htmlFor={`adjust-${point.ioa}`}>
+                        {point.name}
+                      </label>
+                      <small>{showIoa(point.ioa)}</small>
+                    </div>
+                    <div className="adjust-value">
+                      <span>
+                        当前{" "}
+                        <b>
+                          {isUsable(values[point.ioa]) && status.started
+                            ? pointValue(point, values[point.ioa])
+                            : "待确认"}
+                        </b>
+                      </span>
+                      {point.ioa === 0x300c ? (
+                        <select
+                          id={`adjust-${point.ioa}`}
+                          value={input}
+                          disabled={disabled}
+                          onChange={(e) =>
+                            setAdjustments((current) => ({
+                              ...current,
+                              [point.ioa]: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">选择模式</option>
+                          {["待机送风", "制冷", "加热", "除湿"].map(
+                            (mode, index) => (
+                              <option key={mode} value={index}>
+                                {index} · {mode}
+                              </option>
+                            ),
+                          )}
+                        </select>
+                      ) : (
+                        <div className="unit-input">
+                          <input
+                            id={`adjust-${point.ioa}`}
+                            type="number"
+                            step={step}
+                            placeholder="输入新值"
+                            value={input}
+                            disabled={disabled}
+                            aria-invalid={!!input && !!validation}
+                            aria-describedby={`hint-${point.ioa}`}
+                            onChange={(e) =>
+                              setAdjustments((current) => ({
+                                ...current,
+                                [point.ioa]: e.target.value,
+                              }))
+                            }
+                          />
+                          <span>{point.unit}</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="adjust-actions">
+                      <small
+                        id={`hint-${point.ioa}`}
+                        className={input && validation ? "alarm-text" : ""}
+                      >
+                        {pending?.ioa === point.ioa
+                          ? `等待${pending.action}确认…`
+                          : input && validation
+                            ? validation
+                            : matchesPreset
+                              ? "预置已确认"
+                              : confirmed
+                                ? `已预置 ${presets[point.ioa]}，输入已变更`
+                                : point.ioa >= 0x300d
+                                  ? "−10～10 · 步进 0.01"
+                                  : "等待预置"}
+                      </small>
+                      <button
+                        disabled={disabled || !!validation}
+                        onClick={() => adjust(point.ioa, true, false)}
+                      >
+                        预置
+                      </button>
+                      <button
+                        className="execute"
+                        disabled={disabled || !matchesPreset}
+                        onClick={() => adjust(point.ioa, false, false)}
+                      >
+                        固化
+                      </button>
+                      <button
+                        className="quiet"
+                        disabled={disabled || !confirmed}
+                        onClick={() => adjust(point.ioa, false, true)}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </section>
+                );
+              })}
+          </>
+        )}
+      </div>
+      <div className="panel-foot">
+        <span>
+          {pending
+            ? `等待设备${pending.action}确认…`
+            : status.started
+              ? "动作请求接受后，以设备回传状态为准"
+              : "建立 IEC104 会话后启用控制"}
+        </span>
+      </div>
     </aside>
   );
 }

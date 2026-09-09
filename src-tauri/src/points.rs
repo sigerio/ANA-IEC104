@@ -20,7 +20,9 @@ pub fn all() -> Vec<PointDef> {
         (0x000013, "WS2812 灯效活动", "遥信", ""),
         (0x000014, "指示灯已点亮", "遥信", ""),
         (0x000015, "内部照明已点亮", "遥信", ""),
-        (0x000016, "独立装饰灯带已点亮", "遥信", ""),
+        (0x000016, "门加热解冻使能", "遥信", ""),
+        (0x000017, "门限位冲突故障", "遥信", ""),
+        (0x000018, "平台限位冲突故障", "遥信", ""),
         (0x000100, "门状态", "遥测", "状态码"),
         (0x000101, "停机坪状态", "遥测", "状态码"),
         (0x000200, "打开门", "遥控", ""),
@@ -31,6 +33,8 @@ pub fn all() -> Vec<PointDef> {
         (0x000221, "空调监控关机", "遥控", ""),
         (0x000222, "打开内部照明", "遥控", ""),
         (0x000223, "关闭内部照明", "遥控", ""),
+        (0x000224, "使能门加热解冻", "遥控", ""),
+        (0x000225, "关闭门加热", "遥控", ""),
         (0x001000, "温湿度传感器在线", "遥信", ""),
         (0x001001, "温湿度传感器故障", "遥信", ""),
         (0x001010, "风速风向传感器在线", "遥信", ""),
@@ -100,8 +104,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decodes_all_36_signals_and_limit_fault_quality() {
+        let points: Vec<_> = all().into_iter().filter(|p| p.kind == "遥信").collect();
+        let mut asdu = vec![1, 36, 20, 0, 1, 0];
+        for point in &points {
+            asdu.extend_from_slice(&point.ioa.to_le_bytes()[..3]);
+            asdu.push(match point.ioa {
+                0x17 => 1,
+                0x18 => 0xc0,
+                _ => 0,
+            });
+        }
+        let frame = crate::iec104::i(0, 0, asdu);
+        assert_eq!(frame[1], 0x9a);
+        let parsed = crate::iec104::parse(&frame);
+        assert!(parsed.error.is_none());
+        assert_eq!(parsed.objects.len(), 36);
+        for (point, object) in points.iter().zip(&parsed.objects) {
+            assert_eq!(point.ioa, object.ioa);
+        }
+        let door = parsed.objects.iter().find(|p| p.ioa == 0x17).unwrap();
+        assert_eq!(door.value, "ON");
+        assert_eq!(door.quality, "正常");
+        let platform = parsed.objects.iter().find(|p| p.ioa == 0x18).unwrap();
+        assert_eq!(platform.value, "OFF");
+        assert_eq!(platform.quality, "NT|IV");
+    }
+
+    #[test]
     fn includes_configured_controls() {
         let points = all();
+        assert_eq!(
+            points.iter().filter(|point| point.kind == "遥信").count(),
+            36
+        );
+        assert!(points.iter().any(|point| point.ioa == 0x000017
+            && point.name == "门限位冲突故障"
+            && point.kind == "遥信"));
+        assert!(points.iter().any(|point| point.ioa == 0x000018
+            && point.name == "平台限位冲突故障"
+            && point.kind == "遥信"));
         assert_eq!(
             points
                 .iter()
@@ -124,8 +166,18 @@ mod tests {
         assert!(points
             .iter()
             .any(|point| point.ioa == 0x003010 && point.name == "风向校正"));
-        assert!(!points
-            .iter()
-            .any(|point| matches!(point.ioa, 0x000224 | 0x000225)));
+        assert_eq!(
+            points.iter().filter(|point| point.kind == "遥控").count(),
+            10
+        );
+        for (ioa, name, kind) in [
+            (0x000016, "门加热解冻使能", "遥信"),
+            (0x000224, "使能门加热解冻", "遥控"),
+            (0x000225, "关闭门加热", "遥控"),
+        ] {
+            assert!(points
+                .iter()
+                .any(|point| point.ioa == ioa && point.name == name && point.kind == kind));
+        }
     }
 }

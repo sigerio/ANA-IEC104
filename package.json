@@ -1,12 +1,13 @@
 {
   "name": "ana-iec104",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "check": "tsc --noEmit",
+    "test:ui": "node scripts/check-ui.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "build:win": "bash scripts/build-windows-installer.sh"

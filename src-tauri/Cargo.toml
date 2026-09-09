@@ -1,6 +1,6 @@
 [package]
 name = "ana-iec104"
-version = "0.1.0"
+version = "0.2.2"
 description = "Serial IEC 60870-5-104 master station"
 edition = "2021"
 

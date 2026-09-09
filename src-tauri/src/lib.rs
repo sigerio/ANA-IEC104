@@ -105,6 +105,29 @@ impl Protocol {
         Ok(())
     }
 
+    fn prepare_i(&self, asdu: Vec<u8>) -> Result<Vec<u8>, String> {
+        if !self.state.started() {
+            return Err("请先建立 IEC104 主从通信".into());
+        }
+        if self.unacknowledged >= K {
+            return Err("未确认业务帧已达 k=12，请等待对端确认".into());
+        }
+        Ok(iec104::i(self.ns, self.nr, asdu))
+    }
+
+    fn accept_i(&mut self, ns: u16, nr: u16) -> Result<(), String> {
+        self.acknowledge(nr)?;
+        if ns != self.expected_rx_ns {
+            return Err(format!(
+                "接收序号异常：期望 N(S)={}，收到 {ns}",
+                self.expected_rx_ns
+            ));
+        }
+        self.expected_rx_ns = (self.expected_rx_ns + 1) % 32_768;
+        self.nr = self.expected_rx_ns;
+        Ok(())
+    }
+
     fn start(&mut self, now: Instant) -> Result<(), String> {
         match self.state {
             ProtocolState::Idle | ProtocolState::WaitingStart => {
@@ -127,9 +150,11 @@ struct Connection {
     protocol: Arc<Mutex<Protocol>>,
     name: String,
     baud_rate: u32,
+    reader_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 struct AppState {
+    connection_operation: Mutex<()>,
     connection: Arc<Mutex<Option<Connection>>>,
 }
 
@@ -170,6 +195,30 @@ fn hex(frame: &[u8]) -> String {
         .join(" ")
 }
 
+#[derive(Clone, Serialize)]
+struct FrameEvent<'a> {
+    #[serde(flatten)]
+    frame: &'a iec104::ParsedFrame,
+    direction: &'static str,
+    accepted: bool,
+}
+
+fn emit_parsed(
+    app: &AppHandle,
+    frame: &iec104::ParsedFrame,
+    direction: &'static str,
+    accepted: bool,
+) {
+    let _ = app.emit(
+        "parsed-frame",
+        FrameEvent {
+            frame,
+            direction,
+            accepted,
+        },
+    );
+}
+
 fn emit_frame(app: &AppHandle, direction: &'static str, frame: &[u8]) -> iec104::ParsedFrame {
     let _ = app.emit(
         "raw-message",
@@ -180,11 +229,16 @@ fn emit_frame(app: &AppHandle, direction: &'static str, frame: &[u8]) -> iec104:
         },
     );
     let parsed = iec104::parse(frame);
-    let _ = app.emit("parsed-frame", parsed.clone());
+    if direction == "TX" {
+        emit_parsed(app, &parsed, direction, false);
+    }
     parsed
 }
 
 fn emit_status(app: &AppHandle, connection: Option<&Connection>, error: Option<String>) {
+    if connection.is_some_and(|c| c.stop.load(Ordering::Relaxed)) {
+        return;
+    }
     let status = if let Some(connection) = connection {
         let protocol = connection.protocol.lock().unwrap();
         LinkStatus {
@@ -319,9 +373,11 @@ fn receive_frame(
     app: &AppHandle,
     state: &Arc<Mutex<Option<Connection>>>,
     connection: &Connection,
-    parsed: iec104::ParsedFrame,
+    mut parsed: iec104::ParsedFrame,
 ) -> bool {
+    let mut accepted = false;
     if parsed.error.is_some() && parsed.format != "I" {
+        emit_parsed(app, &parsed, "RX", false);
         return true;
     }
     let mut reply = None;
@@ -333,26 +389,19 @@ fn receive_frame(
             "I" => {
                 if !protocol.state.started() {
                     notice = Some("收到业务 I 帧，但 IEC104 主从通信尚未建立".into());
-                } else if let Some(ns) = parsed.ns {
-                    if let Some(nr) = parsed.nr {
-                        if let Err(error) = protocol.acknowledge(nr) {
+                } else if let (Some(ns), Some(nr)) = (parsed.ns, parsed.nr) {
+                    match protocol.accept_i(ns, nr) {
+                        Ok(()) => {
+                            reply = Some(iec104::s(protocol.nr));
+                            if parsed.ca != Some(1) || parsed.oa != Some(0) {
+                                parsed.error = Some("ASDU 公共地址或源发地址不匹配".into());
+                            }
+                            accepted = parsed.error.is_none();
+                        }
+                        Err(error) => {
                             protocol.stop(Instant::now());
                             reply = Some(iec104::u(0x13));
                             notice = Some(format!("{error}；已发送 STOPDT ACT 复位会话"));
-                        }
-                    }
-                    if notice.is_none() {
-                        if ns != protocol.expected_rx_ns {
-                            let expected = protocol.expected_rx_ns;
-                            protocol.stop(Instant::now());
-                            reply = Some(iec104::u(0x13));
-                            notice = Some(format!(
-                                "接收序号异常：期望 N(S)={expected}，收到 {ns}；已发送 STOPDT ACT 复位会话"
-                            ));
-                        } else {
-                            protocol.expected_rx_ns = (protocol.expected_rx_ns + 1) % 32_768;
-                            protocol.nr = protocol.expected_rx_ns;
-                            reply = Some(iec104::s(protocol.nr));
                         }
                     }
                 }
@@ -404,11 +453,16 @@ fn receive_frame(
             return false;
         }
     }
+    emit_parsed(app, &parsed, "RX", accepted);
     emit_status(app, Some(connection), notice);
     true
 }
 
-fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connection: Connection) {
+fn spawn_reader(
+    app: AppHandle,
+    state: Arc<Mutex<Option<Connection>>>,
+    connection: Connection,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut pending = Vec::new();
         let mut bytes = [0_u8; 512];
@@ -425,6 +479,9 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
 
             // 读独占 reader 句柄,不经过 writer 锁 — 写路径(总召唤/遥控)不再被读阻塞饿死。
             let read = connection.reader.lock().unwrap().read(&mut bytes);
+            if connection.stop.load(Ordering::Relaxed) {
+                break;
+            }
             match read {
                 Ok(0) => continue,
                 Err(ref error)
@@ -434,10 +491,17 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                     continue
                 }
                 Ok(count) => {
+                    let _ = app.emit(
+                        "raw-message",
+                        RawMessage {
+                            direction: "RX",
+                            hex: hex(&bytes[..count]),
+                            timestamp: timestamp(),
+                        },
+                    );
                     pending.extend_from_slice(&bytes[..count]);
                     // ponytail: 用起始索引避免 remove(0) 的 O(n) 前移;洪泛时再换 VecDeque。
                     let mut start = 0; // 已消费字节数(垃圾 + 完整帧)
-                    let mut junk_end = 0; // 仅垃圾字节(非 0x68 / 非法长度)的末尾,完整帧不算
                     loop {
                         let buf = &pending[start..];
                         if buf.is_empty() {
@@ -445,7 +509,6 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                         }
                         if buf[0] != 0x68 {
                             start += 1;
-                            junk_end = start;
                             continue;
                         }
                         if buf.len() < 2 {
@@ -454,7 +517,6 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                         let length = buf[1] as usize;
                         if !(4..=253).contains(&length) {
                             start += 1;
-                            junk_end = start;
                             emit_status(&app, Some(&connection), Some("收到非法 APDU 长度".into()));
                             continue;
                         }
@@ -464,21 +526,10 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                         }
                         let frame: Vec<u8> = buf[..total].to_vec();
                         start += total;
-                        let parsed = emit_frame(&app, "RX", &frame);
+                        let parsed = iec104::parse(&frame);
                         if !receive_frame(&app, &state, &connection, parsed) {
                             return;
                         }
-                    }
-                    // 只把真正的垃圾前导字节(未凑成帧、非 0x68)显示为原始 RX;完整帧不重复发。
-                    if junk_end > 0 {
-                        let _ = app.emit(
-                            "raw-message",
-                            RawMessage {
-                                direction: "RX",
-                                hex: hex(&pending[..junk_end]),
-                                timestamp: timestamp(),
-                            },
-                        );
                     }
                     pending.drain(..start);
                 }
@@ -493,7 +544,7 @@ fn spawn_reader(app: AppHandle, state: Arc<Mutex<Option<Connection>>>, connectio
                 }
             }
         }
-    });
+    })
 }
 
 #[tauri::command]
@@ -544,6 +595,7 @@ fn connect(
     port: String,
     baud_rate: u32,
 ) -> Result<(), String> {
+    let _operation = state.connection_operation.lock().unwrap();
     if port.trim().is_empty() || baud_rate == 0 {
         return Err("请选择串口并填写有效波特率".into());
     }
@@ -568,6 +620,7 @@ fn connect(
         protocol: Arc::new(Mutex::new(Protocol::new())),
         name: port,
         baud_rate,
+        reader_thread: Arc::new(Mutex::new(None)),
     };
     *state.connection.lock().unwrap() = Some(connection.clone());
     connection.protocol.lock().unwrap().start(Instant::now())?;
@@ -577,12 +630,17 @@ fn connect(
         Some(&connection),
         Some("物理串口已打开，已发送 STARTDT ACT，等待对端确认".into()),
     );
-    spawn_reader(app, state.connection.clone(), connection);
+    *connection.reader_thread.lock().unwrap() = Some(spawn_reader(
+        app,
+        state.connection.clone(),
+        connection.clone(),
+    ));
     Ok(())
 }
 
 #[tauri::command]
 fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let _operation = state.connection_operation.lock().unwrap();
     let connection = state
         .connection
         .lock()
@@ -590,7 +648,11 @@ fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> 
         .take()
         .ok_or_else(|| "物理串口尚未打开".to_string())?;
     connection.stop.store(true, Ordering::Relaxed);
+    if let Some(reader) = connection.reader_thread.lock().unwrap().take() {
+        let _ = reader.join();
+    }
     connection.protocol.lock().unwrap().idle();
+    drop(connection);
     emit_status(
         &app,
         None,
@@ -633,35 +695,31 @@ fn stop(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
 
 fn send_i(app: &AppHandle, state: &State<'_, AppState>, asdu: Vec<u8>) -> Result<(), String> {
     let connection = current_connection(state)?;
-    let result: Result<(), String> = (|| {
+    let (frame, result) = {
         let mut port = connection
             .writer
             .lock()
             .map_err(|_| "串口锁异常".to_string())?;
         let mut protocol = connection.protocol.lock().unwrap();
-        if !protocol.state.started() {
-            return Err("请先建立 IEC104 主从通信".into());
+        // 业务拒绝直接返回，只有实际 I/O 失败才关闭物理串口。
+        let frame = protocol.prepare_i(asdu)?;
+        let result = port.write_all(&frame).and_then(|()| port.flush());
+        if result.is_ok() {
+            protocol.ns = (protocol.ns + 1) % 32_768;
+            protocol.unacknowledged += 1;
+            if protocol.unacknowledged == 1 {
+                protocol.i_deadline = Some(Instant::now() + T1);
+            }
+            protocol.last_activity = Instant::now();
         }
-        if protocol.unacknowledged >= K {
-            return Err("未确认业务帧已达 k=12，请等待对端确认".into());
-        }
-        let frame = iec104::i(protocol.ns, protocol.nr, asdu);
-        protocol.ns = (protocol.ns + 1) % 32_768;
-        protocol.unacknowledged += 1;
-        if protocol.unacknowledged == 1 {
-            protocol.i_deadline = Some(Instant::now() + T1);
-        }
-        port.write_all(&frame)
-            .map_err(|e| format!("串口写入失败：{e}"))?;
-        port.flush().map_err(|e| format!("串口发送失败：{e}"))?;
-        protocol.last_activity = Instant::now();
-        emit_frame(app, "TX", &frame);
-        Ok(())
-    })();
+        (frame, result)
+    };
     if let Err(error) = result {
+        let error = format!("串口发送失败：{error}");
         physical_failure(app, &state.connection, &connection.writer, error.clone());
         return Err(error);
     }
+    emit_frame(app, "TX", &frame);
     emit_status(app, Some(&connection), None);
     Ok(())
 }
@@ -674,7 +732,7 @@ fn general_interrogation(app: AppHandle, state: State<'_, AppState>) -> Result<(
 fn control_ioa_is_valid(ioa: u32) -> bool {
     matches!(
         ioa,
-        0x200 | 0x201 | 0x210 | 0x211 | 0x220 | 0x221 | 0x222 | 0x223
+        0x200 | 0x201 | 0x210 | 0x211 | 0x220 | 0x221 | 0x222 | 0x223 | 0x224 | 0x225
     )
 }
 
@@ -706,7 +764,7 @@ fn adjust(
 ) -> Result<(), String> {
     if adjust_value_is_invalid(ioa, value, preset, cancel) {
         return Err(
-            "遥调参数无效：空调参数须在 -3276.8 到 3276.7；模式控制须为 0 到 3 的整数；校正参数须在 -10 到 10 且步进 0.01；预置与取消不可同时选择"
+            "遥调参数无效：请检查该点允许范围与步进；模式为 0–3，传感器校正为 -10～10 / 0.01；预置与取消不可同时选择"
                 .into(),
         );
     }
@@ -721,20 +779,35 @@ fn adjust(
 }
 
 fn adjust_value_is_invalid(ioa: u32, value: f32, preset: bool, cancel: bool) -> bool {
-    let calibration = (0x300d..=0x3010).contains(&ioa);
-    !value.is_finite()
-        || !(0x3000..=0x3010).contains(&ioa)
-        || (preset && cancel)
-        || (ioa == 0x300c && (value < 0.0 || value > 3.0 || value.fract() != 0.0))
-        || (calibration
-            && (!(-10.0..=10.0).contains(&value)
-                || ((value * 100.0).round() - value * 100.0).abs() > 0.0001))
-        || (!calibration && ioa != 0x300c && !(-3276.8..=3276.7).contains(&value))
+    if !value.is_finite() || !(0x3000..=0x3010).contains(&ioa) || (preset && cancel) {
+        return true;
+    }
+    if ioa == 0x300c {
+        return !(0.0..=3.0).contains(&value) || value.fract() != 0.0;
+    }
+    if ioa >= 0x300d {
+        return !(-10.0..=10.0).contains(&value)
+            || ((value * 100.0).round() - value * 100.0).abs() > 0.001;
+    }
+    if ioa == 0x300b {
+        return !(-3276.0..=3276.0).contains(&value) || value.fract() != 0.0;
+    }
+    let (min, max) = match ioa {
+        0x3000 => (20.0, 55.0),
+        0x3001 => (15.0, 35.0),
+        0x3002 => (-30.0, 15.0),
+        0x3003 => (0.0, 23.0),
+        0x3004 => (30.0, 60.0),
+        0x3005 => (-10.0, 10.0),
+        _ => (-3276.8, 3276.7),
+    };
+    !(min..=max).contains(&value) || ((value * 10.0).round() - value * 10.0).abs() > 0.001
 }
 
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
+            connection_operation: Mutex::new(()),
             connection: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
@@ -813,7 +886,11 @@ mod tests {
         assert!(adjust_value_is_invalid(0x3011, 1.0, true, false));
         assert!(adjust_value_is_invalid(0x300c, 1.0, true, true));
         assert!(!adjust_value_is_invalid(0x300c, 1.0, true, false));
-        assert!(!adjust_value_is_invalid(0x3000, -3276.8, true, false));
+        assert!(!adjust_value_is_invalid(0x3006, -3276.8, true, false));
+        assert!(adjust_value_is_invalid(0x3000, 19.9, true, false));
+        assert!(!adjust_value_is_invalid(0x3000, 20.0, true, false));
+        assert!(adjust_value_is_invalid(0x300b, 1.5, true, false));
+        assert!(adjust_value_is_invalid(0x3006, 1.25, true, false));
         assert!(!adjust_value_is_invalid(0x300d, -10.0, true, false));
         assert!(!adjust_value_is_invalid(0x3010, 1.25, true, false));
     }
@@ -823,7 +900,62 @@ mod tests {
         assert!(control_ioa_is_valid(0x220));
         assert!(control_ioa_is_valid(0x221));
         assert!(control_ioa_is_valid(0x222));
-        assert!(!control_ioa_is_valid(0x224));
+        assert!(control_ioa_is_valid(0x224));
+        assert!(control_ioa_is_valid(0x225));
+        assert!(!control_ioa_is_valid(0x226));
+        assert!(!control_ioa_is_valid(0x16));
+    }
+
+    #[test]
+    fn business_rejection_preserves_session_and_sequence() {
+        let mut protocol = Protocol::new();
+        assert!(protocol.prepare_i(vec![]).is_err());
+        protocol.state = ProtocolState::Started;
+        protocol.unacknowledged = K;
+        protocol.ns = K;
+        assert!(protocol.prepare_i(vec![]).is_err());
+        assert_eq!(protocol.state, ProtocolState::Started);
+        assert_eq!(protocol.ns, K);
+        assert_eq!(protocol.unacknowledged, K);
+        protocol.acknowledge(1).unwrap();
+        assert!(protocol
+            .prepare_i(iec104::asdu(0x64, 0, vec![0x14]))
+            .is_ok());
+    }
+
+    #[test]
+    fn received_sequence_must_be_contiguous_and_can_wrap() {
+        let mut protocol = Protocol::new();
+        assert!(protocol.accept_i(1, 0).is_err());
+        assert_eq!(protocol.nr, 0);
+        assert!(protocol.accept_i(0, 0).is_ok());
+        assert!(protocol.accept_i(0, 0).is_err());
+        protocol.expected_rx_ns = 32767;
+        assert!(protocol.accept_i(32767, 0).is_ok());
+        assert_eq!(protocol.nr, 0);
+    }
+
+    #[test]
+    fn acknowledgement_wrap_and_handshake_timeout_allow_recovery() {
+        let mut protocol = Protocol::new();
+        protocol.peer_nr = 32767;
+        protocol.ns = 1;
+        protocol.unacknowledged = 2;
+        assert!(protocol.acknowledge(2).is_err());
+        assert_eq!(protocol.unacknowledged, 2);
+        protocol.acknowledge(0).unwrap();
+        assert_eq!(protocol.unacknowledged, 1);
+        protocol.acknowledge(1).unwrap();
+        assert_eq!(protocol.unacknowledged, 0);
+
+        let now = Instant::now();
+        protocol.start(now).unwrap();
+        assert!(protocol_tick(&mut protocol, now + T0).1.is_some());
+        assert_eq!(protocol.state, ProtocolState::Idle);
+        protocol.start(now + T0).unwrap();
+        assert_eq!(protocol.state, ProtocolState::WaitingStart);
+        assert_eq!(protocol.ns, 0);
+        assert_eq!(protocol.nr, 0);
     }
 
     #[test]
