@@ -143,7 +143,7 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                 1 | 3 | 0x2d | 0x64 => 1,
                 13 => 5,
                 0xca => {
-                    if ioa == 0x300c {
+                    if ioa == 0x300c || crate::tis::parameter(ioa).is_some() {
                         3
                     } else {
                         5
@@ -191,7 +191,7 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                             format!("IV|{q}")
                         };
                     }
-                    (format!("{value:.3}"), q)
+                    (value.to_string(), q)
                 }
                 0x2d => (
                     format!(
@@ -203,10 +203,14 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                 ),
                 0x64 => (format!("QOI=0x{:02X}", d[0]), "".into()),
                 0xca => (
-                    if ioa == 0x300c {
-                        format!("{}", u16::from_le_bytes(d[1..3].try_into().unwrap()))
+                    if ioa == 0x300c || crate::tis::parameter(ioa).is_some() {
+                        if crate::tis::signed(ioa) {
+                            i16::from_le_bytes(d[1..3].try_into().unwrap()).to_string()
+                        } else {
+                            u16::from_le_bytes(d[1..3].try_into().unwrap()).to_string()
+                        }
                     } else {
-                        format!("{:.3}", f32::from_le_bytes(d[1..5].try_into().unwrap()))
+                        f32::from_le_bytes(d[1..5].try_into().unwrap()).to_string()
                     },
                     format!("PI=0x{:02X}", d[0]),
                 ),

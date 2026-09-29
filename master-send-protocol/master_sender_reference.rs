@@ -1,4 +1,4 @@
-//! ANA IEC104 主站发送报文参考实现。
+//! ANA IEC104 主站发送报文参考实现（原有空调/气象示例；TIS 校验与组帧见 src-tauri/src/tis.rs）。
 //! 无第三方依赖：`rustc master_sender_reference.rs && ./master_sender_reference`。
 
 const STARTDT_ACT: u8 = 0x07;
@@ -43,7 +43,7 @@ fn general_interrogation(ns: u16, nr: u16) -> Vec<u8> {
 }
 
 fn control(ns: u16, nr: u16, ioa: u32, select: bool) -> Result<Vec<u8>, &'static str> {
-    if !matches!(ioa, 0x200 | 0x201 | 0x210 | 0x211 | 0x220 | 0x221 | 0x222 | 0x223) {
+    if !matches!(ioa, 0x200 | 0x201 | 0x210 | 0x211 | 0x220..=0x225 | 0x230..=0x238 | 0x300 | 0x301 | 0x306 | 0x307 | 0x30e..=0x313) {
         return Err("unsupported control IOA");
     }
     Ok(i_frame(

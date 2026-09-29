@@ -1,5 +1,6 @@
 mod iec104;
 mod points;
+mod tis;
 
 use serde::Serialize;
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
@@ -54,6 +55,8 @@ struct Protocol {
     i_deadline: Option<Instant>,
     last_activity: Instant,
     test_deadline: Option<Instant>,
+    tis_level: Option<i32>,
+    tis_voltage: Option<i32>,
 }
 
 impl Protocol {
@@ -69,6 +72,8 @@ impl Protocol {
             i_deadline: None,
             last_activity: Instant::now(),
             test_deadline: None,
+            tis_level: None,
+            tis_voltage: None,
         }
     }
     fn idle(&mut self) {
@@ -76,6 +81,8 @@ impl Protocol {
         self.deadline = None;
         self.i_deadline = None;
         self.test_deadline = None;
+        self.tis_level = None;
+        self.tis_voltage = None;
         self.unacknowledged = 0;
         // 会话复位即序号归零:下次 STARTDT 重新从 0 计数。
         self.ns = 0;
@@ -397,6 +404,35 @@ fn receive_frame(
                                 parsed.error = Some("ASDU 公共地址或源发地址不匹配".into());
                             }
                             accepted = parsed.error.is_none();
+                            if accepted && matches!(parsed.cot, Some(3 | 20)) {
+                                if parsed.ti == Some(13) {
+                                    for obj in &parsed.objects {
+                                        let value = obj
+                                            .value
+                                            .parse::<f32>()
+                                            .ok()
+                                            .filter(|v| {
+                                                v.is_finite()
+                                                    && v.fract() == 0.0
+                                                    && obj.quality == "正常"
+                                            })
+                                            .map(|v| v as i32);
+                                        match obj.ioa {
+                                            0x19006 => protocol.tis_level = value,
+                                            0x1311d => protocol.tis_voltage = value,
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                if parsed.ti == Some(1)
+                                    && parsed.objects.iter().any(|o| {
+                                        o.ioa == 0x1100f && (o.value != "ON" || o.quality != "正常")
+                                    })
+                                {
+                                    protocol.tis_level = None;
+                                    protocol.tis_voltage = None;
+                                }
+                            }
                         }
                         Err(error) => {
                             protocol.stop(Instant::now());
@@ -730,10 +766,9 @@ fn general_interrogation(app: AppHandle, state: State<'_, AppState>) -> Result<(
 }
 
 fn control_ioa_is_valid(ioa: u32) -> bool {
-    matches!(
-        ioa,
-        0x200 | 0x201 | 0x210 | 0x211 | 0x220 | 0x221 | 0x222 | 0x223 | 0x224 | 0x225
-    )
+    points::all()
+        .iter()
+        .any(|p| p.ioa == ioa && p.kind == "遥控")
 }
 
 #[tauri::command]
@@ -778,6 +813,29 @@ fn adjust(
     send_i(&app, &state, iec104::asdu(0xca, ioa, data))
 }
 
+#[tauri::command]
+fn adjust_tis(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    items: Vec<tis::Setting>,
+    pi: u8,
+) -> Result<(), String> {
+    let connection = current_connection(&state)?;
+    let level = {
+        let protocol = connection.protocol.lock().unwrap();
+        protocol
+            .tis_level
+            .filter(|n| (1..=4).contains(n))
+            .or_else(|| {
+                protocol
+                    .tis_voltage
+                    .filter(|v| matches!(v, 12 | 24 | 36 | 48))
+                    .map(|v| v / 12)
+            })
+    };
+    send_i(&app, &state, tis::build(&items, pi, level)?)
+}
+
 fn adjust_value_is_invalid(ioa: u32, value: f32, preset: bool, cancel: bool) -> bool {
     if !value.is_finite() || !(0x3000..=0x3010).contains(&ioa) || (preset && cancel) {
         return true;
@@ -820,6 +878,7 @@ pub fn run() {
             stop,
             general_interrogation,
             control,
+            adjust_tis,
             adjust
         ])
         .run(tauri::generate_context!())
@@ -902,6 +961,12 @@ mod tests {
         assert!(control_ioa_is_valid(0x222));
         assert!(control_ioa_is_valid(0x224));
         assert!(control_ioa_is_valid(0x225));
+        for ioa in [0x230, 0x232, 0x238, 0x300, 0x307, 0x30e, 0x313] {
+            assert!(control_ioa_is_valid(ioa));
+        }
+        for ioa in [0x239, 0x302, 0x308, 0x314] {
+            assert!(!control_ioa_is_valid(ioa));
+        }
         assert!(!control_ioa_is_valid(0x226));
         assert!(!control_ioa_is_valid(0x16));
     }

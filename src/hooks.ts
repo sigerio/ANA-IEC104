@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { commandText, getPoints, getStatus, listPorts, send } from "./api";
-import { adjustmentError, now, showIoa } from "./format";
+import { adjustmentError, adjustmentGroup, parameterReplyMatches, now, showIoa } from "./format";
 import type { Frame, Point, Raw, Status, Value } from "./types";
 
 const INITIAL_STATUS: Status = {
@@ -17,7 +17,7 @@ const INITIAL_STATUS: Status = {
 type Pending = {
   ioa: number;
   action: "选择" | "执行" | "预置" | "固化" | "取消" | "总召";
-  value?: number;
+  items?: { ioa: number; value: number }[];
   deadline: number;
 };
 
@@ -130,7 +130,7 @@ export function useLink() {
     if (
       !select &&
       !window.confirm(
-        `确认执行「${name}」？\n命令接受后，请通过设备遥信确认实际动作结果。`,
+        `确认执行「${name}」？\n${ioa >= 0x230 && ioa <= 0x238 ? "万融无运行或到位反馈；请求接受不代表动作成功，请现场核实。" : "请求接受不代表动作成功，请核对设备回传。"}`,
       )
     )
       return;
@@ -151,39 +151,33 @@ export function useLink() {
       !statusRef.current.started
     )
       return;
-    const input = adjustments[ioa] || "";
-    const invalid = adjustmentError(ioa, input);
-    if (!cancel && invalid) {
-      setError(invalid);
+    const group = adjustmentGroup(ioa);
+    const items = group.map((address) => ({
+      ioa: address,
+      value: cancel ? presets[address] : Number(adjustments[address]),
+    }));
+    if (!cancel) {
+      for (const address of group) {
+        const invalid = adjustmentError(address, adjustments[address] || "");
+        if (invalid) {
+          setError(`${showIoa(address)}：${invalid}${group.length > 1 ? "；时间组三个值须全部填写" : ""}`);
+          return;
+        }
+      }
+    }
+    if (items.some((p) => p.value === undefined)) return;
+    if (!preset && !cancel && items.some((p) => presets[p.ioa] !== p.value)) {
+      setError("请先预置整组当前数值并等待确认");
       return;
     }
-    const value = cancel ? presets[ioa] : Number(input);
-    if (value === undefined) return;
-    if (!preset && !cancel && presets[ioa] !== value) {
-      setError("请先预置当前数值并等待确认");
-      return;
-    }
-    if (
-      !preset &&
-      !cancel &&
-      !window.confirm(
-        `确认固化「${points.find((p) => p.ioa === ioa)?.name}」为 ${value}？`,
-      )
-    )
-      return;
-    // 新的参数请求使旧许可失效，发送失败也不能沿用旧预置确认。
-    setPresets((current) => {
-      const next = { ...current };
-      delete next[ioa];
-      return next;
-    });
-    updatePending({
-      ioa,
-      action: cancel ? "取消" : preset ? "预置" : "固化",
-      value,
-      deadline: Date.now() + 15000,
-    });
-    await run("adjust", { ioa, value, preset, cancel });
+    if (!preset && !cancel && !window.confirm(
+      `确认固化以下参数？\n${items.map((p) => `${points.find((point) => point.ioa === p.ioa)?.name} = ${p.value}${ioa >= 0x19000 ? "（原始码）" : ""}`).join("\n")}`,
+    )) return;
+    // 一次只保留一组许可，避免旧参数集合与新预置混用。
+    setPresets({});
+    updatePending({ ioa, action: cancel ? "取消" : preset ? "预置" : "固化", items, deadline: Date.now() + 15000 });
+    if (ioa >= 0x19000) await run("adjust_tis", { items, pi: cancel ? 2 : preset ? 1 : 0 });
+    else await run("adjust", { ioa, value: items[0].value, preset, cancel });
   };
 
   useEffect(() => {
@@ -270,16 +264,10 @@ export function useLink() {
                 : request.action === "执行"
                   ? obj.raw === "01"
                   : true;
-            const parameterMatches =
-              request.value === undefined ||
-              (Math.fround(Number(obj.value)) === Math.fround(request.value) &&
-                obj.raw.startsWith(
-                  request.action === "预置"
-                    ? "01 "
-                    : request.action === "取消"
-                      ? "02 "
-                      : "00 ",
-                ));
+            const parameterMatches = !request.items || parameterReplyMatches(
+              frame.objects, request.items,
+              request.action === "预置" ? 1 : request.action === "取消" ? 2 : 0,
+            );
             updatePending(null);
             if (
               frame.cot !== expectedCot ||
@@ -287,11 +275,7 @@ export function useLink() {
               !parameterMatches
             ) {
               setSelected(null);
-              setPresets((current) => {
-                const next = { ...current };
-                delete next[request.ioa];
-                return next;
-              });
+              setPresets({});
               setError(
                 `${request.action}未成功：${frame.cot_name}，请重新开始选择或预置。`,
               );
@@ -299,19 +283,12 @@ export function useLink() {
             }
             if (request.action === "选择") setSelected(request.ioa);
             if (request.action === "预置")
-              setPresets((current) => ({
-                ...current,
-                [request.ioa]: request.value!,
-              }));
+              setPresets(Object.fromEntries(request.items!.map((p) => [p.ioa, p.value])));
             if (["固化", "取消"].includes(request.action))
-              setPresets((current) => {
-                const next = { ...current };
-                delete next[request.ioa];
-                return next;
-              });
+              setPresets({});
             setNotice(
               request.action === "执行"
-                ? "设备已接受动作请求，请通过遥信确认实际结果。"
+                ? (request.ioa >= 0x230 && request.ioa <= 0x238 ? "万融动作请求已接受；本协议无到位反馈，请现场核实。" : "设备已接受动作请求，请通过遥信确认实际结果。")
                 : request.action === "固化"
                   ? "设备已接受参数写入请求；请稍后总召核对实际回传值。"
                   : `${request.action}已确认${request.action === "选择" ? "，可执行该控制点" : ""}。`,
@@ -343,11 +320,7 @@ export function useLink() {
       if (request && Date.now() >= request.deadline) {
         updatePending(null);
         setSelected(null);
-        setPresets((current) => {
-          const next = { ...current };
-          delete next[request.ioa];
-          return next;
-        });
+        setPresets({});
         setError(
           `${request.action}确认超时，结果尚未确认；请检查通信记录并总召核对，避免重复执行动作。`,
         );

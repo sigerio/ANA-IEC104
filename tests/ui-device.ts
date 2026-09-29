@@ -2,12 +2,18 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import definitions from "../src-tauri/src/points.rs?raw";
+import tisDefinitions from "../src-tauri/src/tis.rs?raw";
 
 const points = [
   ...definitions.matchAll(
-    /\((0x[\dA-Fa-f]+), "([^"]+)", "([^"]+)", "([^"]*)"\)/g,
+    /\(\s*(0x[\dA-Fa-f]+),\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]*)",?\s*\)/g,
   ),
 ].map((m) => ({ ioa: Number(m[1]), name: m[2], kind: m[3], unit: m[4] }));
+const parameters = [...tisDefinitions.matchAll(/\(\s*(0x[\dA-Fa-f]+),\s*([\d.]+),\s*"([^"]*)",?\s*\)/g)];
+for (const p of points) {
+  const param = parameters.find((m) => Number(m[1]) === p.ioa);
+  if (param) Object.assign(p, { scale: Number(param[2]), hint: param[3] });
+}
 const status = {
   serialConnected: false,
   started: false,
@@ -66,39 +72,21 @@ const device = {
   frame,
   status,
   async publish() {
-    await emit(
-      "parsed-frame",
-      frame(
-        "M_SP_NA_1",
-        points
-          .filter((p) => p.kind === "遥信")
-          .map((p) => ({
-            ioa: p.ioa,
-            value:
-              p.name.endsWith("在线") || [2, 4, 0x14, 0x15].includes(p.ioa)
-                ? "ON"
-                : "OFF",
-            raw: "00",
-            quality: "正常",
-          })),
-        20,
-      ),
-    );
-    await emit(
-      "parsed-frame",
-      frame(
-        "M_ME_NC_1",
-        points
-          .filter((p) => p.kind === "遥测" || p.kind === "遥调")
-          .map((p) => ({
-            ioa: p.ioa,
-            value: String(values[p.ioa] ?? 0),
-            raw: "00",
-            quality: "正常",
-          })),
-        20,
-      ),
-    );
+    for (const [ti, definitions] of [
+      ["M_SP_NA_1", points.filter((p) => p.kind === "遥信")],
+      ["M_ME_NC_1", points.filter((p) => p.kind === "遥测" || p.kind === "遥调")],
+    ] as const) {
+      for (let start = 0; start < definitions.length; start += 16) {
+        const objects = definitions.slice(start, start + 16).map((p) => ({
+          ioa: p.ioa,
+          value: ti === "M_SP_NA_1"
+            ? p.name.endsWith("在线") || [2, 4, 0x14, 0x15].includes(p.ioa) ? "ON" : "OFF"
+            : String(values[p.ioa] ?? 0),
+          raw: "00", quality: "正常",
+        }));
+        await emit("parsed-frame", frame(ti, objects, 20));
+      }
+    }
   },
 };
 Object.assign(window, { testDevice: device });
@@ -134,7 +122,7 @@ mockIPC(
       });
       await emit("link-status", { ...status });
     }
-    if (["control", "adjust", "general_interrogation"].includes(cmd)) {
+    if (["control", "adjust", "adjust_tis", "general_interrogation"].includes(cmd)) {
       if (device.failCommand) throw new Error("模拟业务发送失败");
       await emit("raw-message", {
         direction: "TX",
@@ -144,7 +132,7 @@ mockIPC(
       const ti =
         cmd === "control"
           ? "C_SC_NA_1"
-          : cmd === "adjust"
+          : ["adjust", "adjust_tis"].includes(cmd)
             ? "C_WS_NA_1"
             : "C_IC_NA_1";
       const obj = {
@@ -165,9 +153,14 @@ mockIPC(
               ? `${args.cancel ? "02" : args.preset ? "01" : "00"} ${rawValue(Number(args.value), args.ioa === 0x300c)}`
               : "14",
       };
+      const objects = cmd === "adjust_tis"
+        ? (args.items as {ioa: number; value: number}[]).map((p) => ({
+          ...p, value: String(p.value), quality: `PI=${args.pi}`,
+          raw: `${Number(args.pi).toString(16).padStart(2, "0")} ${rawValue(p.value, true)}`,
+        })) : [obj];
       await emit(
         "parsed-frame",
-        frame(ti, [obj], 6, { direction: "TX", accepted: false }),
+        frame(ti, objects, 6, { direction: "TX", accepted: false }),
       );
       if (!device.silent)
         setTimeout(async () => {
@@ -178,12 +171,14 @@ mockIPC(
           });
           const cot = device.reject
             ? 0x47
-            : args.select || args.preset || args.cancel
+            : args.select || args.preset || args.cancel || args.pi === 1 || args.pi === 2
               ? 7
               : 10;
-          if (cmd === "general_interrogation" && !device.reject)
+          if (cmd === "general_interrogation" && !device.reject) {
+            await emit("parsed-frame", frame(ti, objects, 7));
             await device.publish();
-          await emit("parsed-frame", frame(ti, [obj], cot));
+          }
+          await emit("parsed-frame", frame(ti, objects, cot));
         }, 40);
     }
   },

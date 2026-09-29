@@ -1,4 +1,4 @@
-export type Point = { ioa: number; name: string; kind: string; unit: string };
+export type Point = { ioa: number; name: string; kind: string; unit: string; hint?: string; scale?: number | null };
 export type Value = {
   value: string;
   quality: string;
