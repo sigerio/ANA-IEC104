@@ -8,7 +8,13 @@ const points = [
   ...definitions.matchAll(
     /\(\s*(0x[\dA-Fa-f]+),\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]*)",?\s*\)/g,
   ),
-].map((m) => ({ ioa: Number(m[1]), name: m[2], kind: m[3], unit: m[4] }));
+].map((m) => ({
+  ioa: Number(m[1]),
+  name: m[2],
+  kind: m[3],
+  unit: m[4],
+  readback: m[3] !== "遥控" && ![0x3011, 0x3012].includes(Number(m[1])),
+}));
 const parameters = [...tisDefinitions.matchAll(/\(\s*(0x[\dA-Fa-f]+),\s*([\d.]+),\s*"([^"]*)",?\s*\)/g)];
 for (const p of points) {
   const param = parameters.find((m) => Number(m[1]) === p.ioa);
@@ -37,10 +43,14 @@ const frame = (ti_name: string, objects: unknown[], cot = 3, extra = {}) => ({
   error: null,
   ...extra,
 });
-const rawValue = (value: number, mode = false) => {
-  const bytes = new Uint8Array(mode ? 2 : 4);
+const rawValue = (value: number, ioa: number) => {
+  const timer = [0x19663, 0x19666, 0x19669, 0x1966c].includes(ioa);
+  const integer = ioa === 0x300c || ioa === 0x3011 || ioa === 0x3012 ||
+    (ioa >= 0x1960f && ioa <= 0x19671);
+  const bytes = new Uint8Array(timer || !integer ? 4 : 2);
   const view = new DataView(bytes.buffer);
-  if (mode) view.setUint16(0, value, true);
+  if (timer) view.setUint32(0, value, true);
+  else if (integer) view.setUint16(0, value, true);
   else view.setFloat32(0, value, true);
   return [...bytes]
     .map((b) => b.toString(16).padStart(2, "0").toUpperCase())
@@ -60,6 +70,11 @@ const values: Record<number, number> = {
   0x3004: 50,
   0x3005: 5,
   0x300c: 1,
+  0x13523: 0x5000,
+  0x19622: -10,
+  0x19660: 3,
+  0x19663: 63030,
+  0x19666: 86399,
 };
 const device = {
   ports: ["COM3", "COM5"],
@@ -74,7 +89,7 @@ const device = {
   async publish() {
     for (const [ti, definitions] of [
       ["M_SP_NA_1", points.filter((p) => p.kind === "遥信")],
-      ["M_ME_NC_1", points.filter((p) => p.kind === "遥测" || p.kind === "遥调")],
+      ["M_ME_NC_1", points.filter((p) => (p.kind === "遥测" || p.kind === "遥调") && p.readback)],
     ] as const) {
       for (let start = 0; start < definitions.length; start += 16) {
         const objects = definitions.slice(start, start + 16).map((p) => ({
@@ -150,13 +165,13 @@ mockIPC(
               ? "81"
               : "01"
             : cmd === "adjust"
-              ? `${args.cancel ? "02" : args.preset ? "01" : "00"} ${rawValue(Number(args.value), args.ioa === 0x300c)}`
+              ? `${args.cancel ? "02" : args.preset ? "01" : "00"} ${rawValue(Number(args.value), Number(args.ioa))}`
               : "14",
       };
       const objects = cmd === "adjust_tis"
         ? (args.items as {ioa: number; value: number}[]).map((p) => ({
           ...p, value: String(p.value), quality: `PI=${args.pi}`,
-          raw: `${Number(args.pi).toString(16).padStart(2, "0")} ${rawValue(p.value, true)}`,
+          raw: `${Number(args.pi).toString(16).padStart(2, "0")} ${rawValue(p.value, p.ioa)}`,
         })) : [obj];
       await emit(
         "parsed-frame",

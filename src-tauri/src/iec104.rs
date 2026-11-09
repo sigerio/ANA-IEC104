@@ -34,7 +34,6 @@ fn hex(b: &[u8]) -> String {
 fn ti_name(t: u8) -> &'static str {
     match t {
         1 => "M_SP_NA_1",
-        3 => "M_DP_NA_1",
         13 => "M_ME_NC_1",
         0x2D => "C_SC_NA_1",
         0x64 => "C_IC_NA_1",
@@ -140,15 +139,15 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                 x
             };
             let len = match ti {
-                1 | 3 | 0x2d | 0x64 => 1,
+                1 | 0x2d | 0x64 => 1,
                 13 => 5,
-                0xca => {
-                    if ioa == 0x300c || crate::tis::parameter(ioa).is_some() {
-                        3
-                    } else {
-                        5
+                0xca => match crate::tis::value_len(ioa) {
+                    Some(value_len) => 1 + value_len,
+                    None => {
+                        error = Some("未定义的遥调 IOA".into());
+                        break;
                     }
-                }
+                },
                 _ => {
                     error = Some("不支持的 TI 信息元素".into());
                     break;
@@ -163,15 +162,6 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
             let (value, quality) = match ti {
                 1 => (
                     if d[0] & 1 != 0 { "ON" } else { "OFF" }.into(),
-                    quality(d[0]),
-                ),
-                3 => (
-                    match d[0] & 3 {
-                        1 => "开",
-                        2 => "关",
-                        _ => "不确定",
-                    }
-                    .into(),
                     quality(d[0]),
                 ),
                 13 => {
@@ -202,18 +192,18 @@ pub fn parse(f: &[u8]) -> ParsedFrame {
                     "".into(),
                 ),
                 0x64 => (format!("QOI=0x{:02X}", d[0]), "".into()),
-                0xca => (
-                    if ioa == 0x300c || crate::tis::parameter(ioa).is_some() {
-                        if crate::tis::signed(ioa) {
-                            i16::from_le_bytes(d[1..3].try_into().unwrap()).to_string()
-                        } else {
-                            u16::from_le_bytes(d[1..3].try_into().unwrap()).to_string()
-                        }
-                    } else {
+                0xca => {
+                    let value = if (0x003000..=0x00300b).contains(&ioa) {
                         f32::from_le_bytes(d[1..5].try_into().unwrap()).to_string()
-                    },
-                    format!("PI=0x{:02X}", d[0]),
-                ),
+                    } else if crate::tis::is_timer(ioa) {
+                        u32::from_le_bytes(d[1..5].try_into().unwrap()).to_string()
+                    } else if crate::tis::signed(ioa) {
+                        i16::from_le_bytes(d[1..3].try_into().unwrap()).to_string()
+                    } else {
+                        u16::from_le_bytes(d[1..3].try_into().unwrap()).to_string()
+                    };
+                    (value, format!("PI=0x{:02X}", d[0]))
+                }
                 _ => (hex(d), "".into()),
             };
             objects.push(DecodedObject {
@@ -378,5 +368,17 @@ mod tests {
     #[test]
     fn rejects_bad_length() {
         assert!(parse(&[0x68, 4, 7, 0, 0, 0, 0]).error.is_some());
+    }
+
+    #[test]
+    fn parses_v33_timer_telemetry_and_rejects_unknown_adjustment_ioa() {
+        let mut data = 63030_f32.to_le_bytes().to_vec();
+        data.push(0);
+        let parsed = parse(&i(0, 0, asdu(13, 0x019663, data)));
+        assert!(parsed.error.is_none());
+        assert_eq!(parsed.objects[0].value, "63030");
+
+        let parsed = parse(&i(0, 0, asdu(0xca, 0x003010, vec![1, 0, 0, 0, 0])));
+        assert!(parsed.error.is_some());
     }
 }

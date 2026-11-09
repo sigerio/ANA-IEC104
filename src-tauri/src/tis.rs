@@ -1,181 +1,324 @@
 use serde::Deserialize;
 
-// V2.0 §12.2 / §14.2: scale converts raw register codes to engineering readback.
+// V3.3 §7.2/§7.3: scale explains raw write codes versus engineering readback.
+// It is metadata for the UI only; incoming M_ME_NC_1 values are already scaled.
 const PARAMETERS: &[(u32, f32, &str)] = &[
-    (0x019000, 1.0, "0=User；1～12 为协议列出的电池类型；13/14 未定义。"),
-    (0x019001, 1.0, "系统所用蓄电池(组)的标称容量参数范围:1~4000默认100"),
-    (0x019002, 100.0, "参与均衡、提升、浮充、低压断开电压的计算参数。参数范围:0~900默认300."),
-    (0x019003, 1.0, "本机显示的温度单位:1°C(摄氏度);0F(华氏度)。默认1."),
-    (0x019004, 1.0, "液晶背光点亮延时此设置的秒数后关闭。0常灭;100常亮。参数范围:0~100默认0"),
-    (0x019005, 1.0, "显示参数自动翻页周期。0固定显示。参数范围:0~100默认0."),
-    (0x019006, 1.0, "0=自动识别；1/2/3/4=12/24/36/48 V。自动识别需有效系统电压回读。"),
-    (0x019007, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x019008, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x019009, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x01900A, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x01900B, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x01900C, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x01900D, 100.0, "原表未规定独立电压范围；输入 uint16 原始码，关系约束由设备校验。"),
-    (0x01900E, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x01900F, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x019010, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x019011, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x019012, 100.0, "原始码 900×N～1700×N，N=有效电压等级（1～4）；需先总召取得上下文。"),
-    (0x019013, 100.0, "原始码 100～10000；型号额定充电电流限制由设备校验。"),
-    (0x019014, 1.0, "蓄电池长时间不间断的维持在均衡电压以上的时间累计分钟数。参数范围:0~120分钟。默认120分钟"),
-    (0x019015, 1.0, "蓄电池不间断的维持在提升电压以上的时间累计分钟数。参数范围:0~120分钟。默认120分钟"),
-    (0x019016, 1.0, "3锂电池温度保护使能;4不使能。低温禁止充放电使能【本机设置:仅锂电池类型或锂电自定义类型下可设置使能与否。PC不受限制,可设】"),
-    (0x019017, 100.0, "使能锂电池保护后生效:当实际测量温度小于该参数时,关闭充电或禁止充电参数范围:-2500~1000"),
-    (0x019018, 100.0, "使能锂电池保护后生效:当实际测量温度小于该参数时,关闭放电或禁止放电参数范围:-2500~1000"),
-    (0x019019, 1.0, "高字节=分，低字节=秒，均为 0～59；RTC 三点同帧。"),
-    (0x01901A, 1.0, "高字节=日（1～31），低字节=时（0～23）；RTC 三点同帧。"),
-    (0x01901B, 1.0, "高字节=年字段（0～99），低字节=月（1～12）；不指定年份纪元。"),
-    (0x01901C, 100.0, "蓄电池表面的温度高于此值发出告警提示,停止充放电等。低于此值1000恢复正常。参数范围:4000~10000默认6500"),
-    (0x01901D, 100.0, "蓄电池表面的温度低于此值发出告警提示。高于此值1000恢复正常。参数范围:0~6000"),
-    (0x01901E, 100.0, "设备内的温度高于此值发出告警提示,作出停止充放电等动作。参数范围:6500~10000"),
-    (0x01901F, 100.0, "发生超温后。低于此值恢复正常。参数范围:5500~10000"),
-    (0x019020, 100.0, "功率器件表面的温度高于此值发出告警提示,作出停止充放电等动作。参数范围:6500~10000"),
-    (0x019021, 100.0, "功率器件超温后低于此值恢复正常。参数范围:5500~10000"),
-    (0x019022, 1.0, "0手动1光控开关2光控+多时段3定时开关6常亮模式7光控开关+取反模式"),
-    (0x019023, 1.0, "0-关,1-开"),
-    (0x019024, 100.0, "光电池电压低于此电压视为接近夜晚。参数范围:500~5000"),
-    (0x019025, 1.0, "光电池电压低于夜晚时间阈值电压,且维持时间超过光控启动延时时间则视为夜晚。参数范围:0~9900默认:1000"),
-    (0x019026, 0.01, "光电池电压高于此电压视为接近白天。参数范围:60~8000默认:600"),
-    (0x019027, 1.0, "光电池电压高于白天时间阈值电压,且维持时间超过光控关闭延时时间则视为白天。此项时间的单位为分钟。参数范围:0~9900默认:1000"),
-    (0x019028, 1.0, "高字节小时、低字节分钟；3:00～24:00，分钟 0～59。"),
-    (0x019029, 1.0, "记录负载选中的时间段。0,使用1个时段,1-使用2个。参数范围:0~1默认0"),
-    (0x01902A, 1.0, "高字节小时、低字节分钟；0:00～24:00，分钟 0～59。"),
-    (0x01902B, 1.0, "高字节小时、低字节分钟；0:00～24:00，分钟 0～59。"),
-    (0x01902C, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x01902D, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x01902E, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x01902F, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019030, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019031, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019032, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019033, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019034, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019035, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019036, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019037, 1.0, "秒/分范围 0..59，时范围 0..23；所属三个寄存器必须同帧完整提交。"),
-    (0x019038, 1.0, "0~1.默认0"),
-    (0x019039, 1.0, "参数范围:1~100.默认99"),
-    (0x01903A, 1.0, "参数范围:1~100.默认95"),
-    (0x01903B, 1.0, "参数范围:1~100.默认10"),
-    (0x01903C, 1.0, "参数范围:1~100.默认10"),
-    (0x01903D, 1.0, "参数范围:1~100.默认8"),
-    (0x01903E, 1.0, "参数范围:1~100.默认5"),
-    (0x01903F, 1.0, "记录运行状态的间隔时间参数范围:10~120 默认10"),
-    (0x019040, 1.0, "锂电池BMS厂家对应的协议号参数范围:1~230"),
-    (0x019041, 1.0, "0 不使能;1使能。使能BMS后当设备读取到有效的BMS参数后,按照读取到的欠压保护值和过压告警值反推12个充电电压点。按照读取的充放电限流值进行充放电限流控制"),
-    (0x019042, 1.0, "0 独立输入:1 集中输入"),
-    (0x019043, 1.0, "1 使能模拟BMS末端限流;0 不使能 。使能后才查询MAP表。"),
-    (0x019047, 1.0, "100~1200"),
-    (0x019049, 1.0, "参数范围:0~60.默认10"),
-    (0x01904B, 1.0, "0正常。1 触发一次均衡充电。默认0"),
+    (
+        0x01960F,
+        1.0,
+        "电池类型 0～12：0=User，1=铅酸免维护，2=胶体，3=铅酸液体，4～12 为协议列出的锂电池类型。",
+    ),
+    (0x019610, 1.0, "蓄电池标称容量，写入 Ah 原始整数 0～65535。"),
+    (0x019611, 1.0, "温度补偿系数 0～9，单位 mV/℃/2V，不乘 100。"),
+    (
+        0x019613,
+        1.0,
+        "充电均衡维持时间，分钟；60～120 为常用值，不作为强制范围。",
+    ),
+    (
+        0x019614,
+        1.0,
+        "充电提升维持时间，分钟；60～120 为常用值，不作为强制范围。",
+    ),
+    (
+        0x019615,
+        100.0,
+        "充电超压断开电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (0x019616, 100.0, "充电限制电压，写入 V×100 的 UINT16 原码。"),
+    (
+        0x019617,
+        100.0,
+        "充电超压断开恢复电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (0x019618, 100.0, "充电均衡电压，写入 V×100 的 UINT16 原码。"),
+    (0x019619, 100.0, "充电提升电压，写入 V×100 的 UINT16 原码。"),
+    (0x01961A, 100.0, "充电浮充电压，写入 V×100 的 UINT16 原码。"),
+    (
+        0x01961B,
+        100.0,
+        "充电提升恢复电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (
+        0x01961C,
+        100.0,
+        "充电低压断开恢复电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (
+        0x01961D,
+        100.0,
+        "充电欠压报警恢复电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (
+        0x01961E,
+        100.0,
+        "充电欠压报警电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (
+        0x01961F,
+        100.0,
+        "充电低压断开电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (0x019620, 100.0, "放电限制电压，写入 V×100 的 UINT16 原码。"),
+    (
+        0x019621,
+        1.0,
+        "锂电池参数使能：768（0x0300）使能，1024（0x0400）不使能；不是 3/4。",
+    ),
+    (
+        0x019622,
+        100.0,
+        "低温禁止充电控制点，-40～+10℃；写入 ℃×100 的 I16 补码。",
+    ),
+    (
+        0x019623,
+        100.0,
+        "低温禁止放电控制点，-40～+10℃；写入 ℃×100 的 I16 补码。",
+    ),
+    (
+        0x019624,
+        1.0,
+        "系统分秒参数：高字节为分、低字节为秒，各 0～59；不是完整 RTC。",
+    ),
+    (
+        0x019631,
+        100.0,
+        "逆变器输出电压等级，仅允许 11000、12000、22000、23000。",
+    ),
+    (
+        0x019632,
+        100.0,
+        "逆变器输出频率，仅允许 5000（50Hz）或 6000（60Hz）。",
+    ),
+    (
+        0x019633,
+        100.0,
+        "逆变低压断开电压值，写入 V×100；详细适用范围由设备校验。",
+    ),
+    (
+        0x019634,
+        100.0,
+        "逆变低压断开恢复电压值，写入 V×100；详细适用范围由设备校验。",
+    ),
+    (
+        0x019635,
+        100.0,
+        "逆变过压断开恢复电压值，写入 V×100；详细适用范围由设备校验。",
+    ),
+    (
+        0x019636,
+        100.0,
+        "逆变过压断开电压值，写入 V×100；详细适用范围由设备校验。",
+    ),
+    (
+        0x019656,
+        100.0,
+        "蓄电池 1 温度告警上限，写入 ℃×100 的 I16 补码。",
+    ),
+    (
+        0x019657,
+        100.0,
+        "蓄电池 1 温度告警下限，写入 ℃×100 的 I16 补码。",
+    ),
+    (
+        0x019658,
+        100.0,
+        "设备内部温度上限，写入 ℃×100 的 I16 补码。",
+    ),
+    (
+        0x019659,
+        100.0,
+        "设备内部温度上限恢复，写入 ℃×100 的 I16 补码。",
+    ),
+    (
+        0x01965C,
+        100.0,
+        "夜晚时间阈值电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (0x01965D, 1.0, "光信号启动（夜晚）确认时间，分钟，倍率 1。"),
+    (
+        0x01965E,
+        100.0,
+        "白天时间阈值电压，写入 V×100 的 UINT16 原码。",
+    ),
+    (0x01965F, 1.0, "光信号关闭（白天）确认时间，分钟，倍率 1。"),
+    (
+        0x019660,
+        1.0,
+        "负载输出控制模式 0～5：手动、光控、光控+多时段、定时及协议扩展模式。",
+    ),
+    (
+        0x019661,
+        1.0,
+        "工作时长 1：高字节小时、低字节分钟，分钟 0～59。",
+    ),
+    (
+        0x019662,
+        1.0,
+        "工作时长 2：高字节小时、低字节分钟，分钟 0～59。",
+    ),
+    (
+        0x019663,
+        1.0,
+        "定时开时刻 1：当天累计秒数 0～86399，UINT32_LE；不是 HHMMSS。",
+    ),
+    (
+        0x019666,
+        1.0,
+        "定时关时刻 1：当天累计秒数 0～86399，UINT32_LE；不是 HHMMSS。",
+    ),
+    (
+        0x019669,
+        1.0,
+        "定时开时刻 2：当天累计秒数 0～86399，UINT32_LE；不是 HHMMSS。",
+    ),
+    (
+        0x01966C,
+        1.0,
+        "定时关时刻 2：当天累计秒数 0～86399，UINT32_LE；不是 HHMMSS。",
+    ),
+    (
+        0x01966F,
+        1.0,
+        "夜间时长：高字节小时、低字节分钟，分钟 0～59。",
+    ),
+    (
+        0x019670,
+        1.0,
+        "定时控制时间段：0=1 时段、1=2 时段，以此类推，原始码 0～65535。",
+    ),
+    (
+        0x019671,
+        1.0,
+        "手动控制条件下设定的开/关：0 关、1 开；不会自动修改负载模式。",
+    ),
+    (
+        0x003011,
+        1.0,
+        "风向偏移：0 正常，1 偏移 180°；UINT16_LE，无回读。",
+    ),
+    (
+        0x003012,
+        1.0,
+        "雨量灵敏度：0～65535，默认 0x0011；改小增加灵敏度，无回读。",
+    ),
 ];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Category {
+    Power,
+    Environment,
+}
 
 pub fn parameter(ioa: u32) -> Option<&'static (u32, f32, &'static str)> {
     PARAMETERS.iter().find(|p| p.0 == ioa)
 }
 
+pub fn is_power(ioa: u32) -> bool {
+    (0x01960F..=0x019671).contains(&ioa) && parameter(ioa).is_some()
+}
+
+pub fn is_environment(ioa: u32) -> bool {
+    matches!(ioa, 0x003011 | 0x003012)
+}
+
+pub fn is_timer(ioa: u32) -> bool {
+    matches!(ioa, 0x019663 | 0x019666 | 0x019669 | 0x01966C)
+}
+
+/// VALUE byte length for every supported C_WS_NA_1 point, excluding PI.
+pub fn value_len(ioa: u32) -> Option<usize> {
+    if (0x003000..=0x00300B).contains(&ioa) || is_timer(ioa) {
+        Some(4)
+    } else if ioa == 0x00300C || is_power(ioa) || is_environment(ioa) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
 pub fn signed(ioa: u32) -> bool {
-    matches!(
-        ioa,
-        0x19006 | 0x1900a | 0x1900e | 0x19017 | 0x19018 | 0x1901d
-    )
+    matches!(ioa, 0x019622 | 0x019623 | 0x019656..=0x019659)
+}
+
+fn category(ioa: u32) -> Option<Category> {
+    if is_power(ioa) {
+        Some(Category::Power)
+    } else if is_environment(ioa) {
+        Some(Category::Environment)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Deserialize)]
 pub struct Setting {
     pub ioa: u32,
-    // Signed integer for int16 points; unsigned integer for uint16 points.
+    // Signed integer for I16 points; unsigned integer for UINT16/UINT32 points.
     pub value: i32,
 }
 
-pub fn build(items: &[Setting], pi: u8, level: Option<i32>) -> Result<Vec<u8>, String> {
+fn validate_value(ioa: u32, value: i32) -> Result<(), String> {
+    let (min, max) = match ioa {
+        0x01960F => (0, 12),
+        0x019611 => (0, 9),
+        0x019621 => (0, 65535),
+        0x019622 | 0x019623 => (-4000, 1000),
+        0x019631 | 0x019632 => (0, 65535),
+        0x019656..=0x019659 => (-32768, 32767),
+        0x019660 => (0, 5),
+        0x019663 | 0x019666 | 0x019669 | 0x01966C => (0, 86399),
+        0x019671 => (0, 1),
+        0x003011 => (0, 1),
+        _ if signed(ioa) => (-32768, 32767),
+        _ => (0, 65535),
+    };
+    if !(min..=max).contains(&value) {
+        return Err(format!("0x{ioa:06X} 原始码范围 {min}～{max}"));
+    }
+    let valid = match ioa {
+        0x019621 => matches!(value, 768 | 1024),
+        0x019624 => value & 0xff <= 59 && (value >> 8) & 0xff <= 59,
+        0x019631 => matches!(value, 11000 | 12000 | 22000 | 23000),
+        0x019632 => matches!(value, 5000 | 6000),
+        0x019661 | 0x019662 | 0x01966F => value & 0xff <= 59,
+        _ => true,
+    };
+    if !valid {
+        return Err(format!("0x{ioa:06X} 枚举或打包参数无效"));
+    }
+    Ok(())
+}
+
+pub fn build(items: &[Setting], pi: u8) -> Result<Vec<u8>, String> {
     if items.is_empty() || items.len() > 16 || pi > 2 {
-        return Err("TIS 每帧须为 1～16 个参数，PI 为 0/1/2".into());
+        return Err("每帧须为 1～16 个参数，PI 为 0/1/2".into());
     }
-    let level = items
-        .iter()
-        .find(|p| p.ioa == 0x19006 && p.value != 0)
-        .map(|p| p.value)
-        .or(level);
-    let mut a = vec![0xca, items.len() as u8, 6, 0, 1, 0];
-    for (i, p) in items.iter().enumerate() {
-        if parameter(p.ioa).is_none() || (i > 0 && items[i - 1].ioa >= p.ioa) {
-            return Err("TIS 参数必须为已定义点，按 IOA 递增且不重复".into());
-        }
-        let v = p.value;
-        let (min, max) = match p.ioa & 0xffff {
-            0x9000 => (0, 12),
-            0x9001 => (1, 4000),
-            0x9002 => (0, 900),
-            0x9003 | 0x9023 | 0x9029 | 0x9038 | 0x9041..=0x9043 | 0x904b => (0, 1),
-            0x9004 | 0x9005 => (0, 100),
-            0x9006 => (0, 4),
-            0x9007..=0x900c | 0x900e..=0x9012 if pi != 2 => {
-                let n = level
-                    .filter(|n| (1..=4).contains(n))
-                    .ok_or("电压参数需要有效电压等级；请总召读取等级或当前系统电压")?;
-                (900 * n, 1700 * n)
-            }
-            0x9013 => (100, 10000),
-            0x9014 | 0x9015 => (0, 120),
-            0x9016 => (3, 4),
-            0x9017 | 0x9018 => (-2500, 1000),
-            0x901c => (4000, 10000),
-            0x901d => (0, 6000),
-            0x901e | 0x9020 => (6500, 10000),
-            0x901f | 0x9021 => (5500, 10000),
-            0x9024 => (500, 5000),
-            0x9025 | 0x9027 => (0, 9900),
-            0x9026 => (60, 8000),
-            0x902c..=0x9037 => (0, if (p.ioa - 0x1902c) % 3 == 2 { 23 } else { 59 }),
-            0x9039..=0x903e => (1, 100),
-            0x903f => (10, 120),
-            0x9040 => (1, 230),
-            0x9047 => (100, 1200),
-            0x9049 => (0, 60),
-            _ => {
-                if signed(p.ioa) {
-                    (0, 32767)
-                } else {
-                    (0, 65535)
-                }
-            }
-        };
-        if !(min..=max).contains(&v) {
-            return Err(format!("0x{:06X} 原始码范围 {min}～{max}", p.ioa));
-        }
-        let lo = v & 255;
-        let hi = v >> 8;
-        let packed_ok = match p.ioa & 0xffff {
-            0x9019 => lo <= 59 && hi <= 59,
-            0x901a => lo <= 23 && (1..=31).contains(&hi),
-            0x901b => (1..=12).contains(&lo) && hi <= 99,
-            0x9022 => matches!(v, 0..=3 | 6 | 7),
-            0x9028 | 0x902a | 0x902b => {
-                lo <= 59 && hi <= 24 && (hi != 24 || lo == 0) && (p.ioa != 0x19028 || hi >= 3)
-            }
-            _ => true,
-        };
-        if !packed_ok {
-            return Err(format!("0x{:06X} 枚举或打包时间无效", p.ioa));
-        }
-        for start in [0x19019, 0x1902c, 0x1902f, 0x19032, 0x19035] {
-            if (start..start + 3).contains(&p.ioa)
-                && !(start..start + 3).all(|ioa| items.iter().any(|p| p.ioa == ioa))
-            {
-                return Err(format!("时间参数必须完整提交 0x{start:06X} 起的三个点"));
-            }
-        }
-        a.extend_from_slice(&p.ioa.to_le_bytes()[..3]);
-        a.push(pi);
-        a.extend_from_slice(&(v as u16).to_le_bytes());
+    let category_kind = category(items[0].ioa).ok_or("不支持的遥调参数点")?;
+    let maximum = match category_kind {
+        Category::Power => 16,
+        Category::Environment => 2,
+    };
+    if items.len() > maximum {
+        return Err("该类别遥调参数超过单帧上限".into());
     }
-    Ok(a)
+    let mut asdu = vec![0xca, items.len() as u8, 6, 0, 1, 0];
+    for (index, item) in items.iter().enumerate() {
+        if category(item.ioa) != Some(category_kind)
+            || (index > 0 && items[index - 1].ioa >= item.ioa)
+        {
+            return Err("遥调参数必须同类、按 IOA 递增且不重复".into());
+        }
+        validate_value(item.ioa, item.value)?;
+        asdu.extend_from_slice(&item.ioa.to_le_bytes()[..3]);
+        asdu.push(pi);
+        if is_timer(item.ioa) {
+            asdu.extend_from_slice(&(item.value as u32).to_le_bytes());
+        } else {
+            asdu.extend_from_slice(&(item.value as u16).to_le_bytes());
+        }
+    }
+    Ok(asdu)
 }
 
 #[cfg(test)]
@@ -183,67 +326,98 @@ mod tests {
     use super::*;
     use crate::iec104;
 
+    fn setting(ioa: u32, value: i32) -> Setting {
+        Setting { ioa, value }
+    }
+
     #[test]
-    fn raw_parameters_match_v2_examples_and_reject_invalid_groups() {
-        let setting = |ioa, value| Setting { ioa, value };
+    fn raw_parameters_match_v33_examples_and_widths() {
         for pi in 0..=2 {
-            let a = build(&[setting(0x19017, -100)], pi, None).unwrap();
-            assert_eq!(a, vec![0xca, 1, 6, 0, 1, 0, 0x17, 0x90, 1, pi, 0x9c, 0xff]);
-            let parsed = iec104::parse(&iec104::i(0, 0, a));
+            let frame = build(&[setting(0x019622, -1000)], pi).unwrap();
+            assert_eq!(
+                frame,
+                vec![0xca, 1, 6, 0, 1, 0, 0x22, 0x96, 1, pi, 0x18, 0xfc]
+            );
+            let parsed = iec104::parse(&iec104::i(0, 0, frame));
             assert!(parsed.error.is_none());
-            assert_eq!(parsed.objects[0].value, "-100");
+            assert_eq!(parsed.objects[0].value, "-1000");
         }
-        let rtc = [
-            setting(0x19019, 0x2238),
-            setting(0x1901a, 0x1d0c),
-            setting(0x1901b, 0x1a09),
-        ];
-        let frame = iec104::i(0, 0, build(&rtc, 1, None).unwrap());
-        assert_eq!(frame[1], 0x1c);
+
+        let timer = build(&[setting(0x019663, 63030)], 1).unwrap();
         assert_eq!(
-            &frame[12..],
-            &[
-                0x19, 0x90, 1, 1, 0x38, 0x22, 0x1a, 0x90, 1, 1, 0x0c, 0x1d, 0x1b, 0x90, 1, 1, 9,
-                0x1a
-            ]
+            timer,
+            vec![0xca, 1, 6, 0, 1, 0, 0x63, 0x96, 1, 1, 0x36, 0xf6, 0, 0]
         );
-        assert_eq!(iec104::parse(&frame).objects.len(), 3);
-        assert!(build(&rtc[..2], 1, None).is_err());
-        for (index, invalid) in [
-            (0, 60),
-            (0, 60 << 8),
-            (1, 24),
-            (1, 32 << 8),
-            (2, 13),
-            (2, (100 << 8) | 1),
-        ] {
-            let mut bad = rtc.clone();
-            bad[index].value = invalid;
-            assert!(build(&bad, 1, None).is_err());
-        }
-        assert!(build(&[rtc[1].clone(), rtc[0].clone(), rtc[2].clone()], 1, None).is_err());
+        let parsed = iec104::parse(&iec104::i(0, 0, timer));
+        assert!(parsed.error.is_none());
+        assert_eq!(parsed.objects[0].value, "63030");
+
+        let enable = build(&[setting(0x019621, 768)], 1).unwrap();
+        assert_eq!(&enable[6..], &[0x21, 0x96, 1, 1, 0, 3]);
+        let packed = build(&[setting(0x019624, 0x2238)], 1).unwrap();
+        assert_eq!(&packed[6..], &[0x24, 0x96, 1, 1, 0x38, 0x22]);
+        assert_eq!(
+            build(&[setting(0x003011, 1)], 1).unwrap()[6..],
+            [0x11, 0x30, 0, 1, 1, 0]
+        );
+        assert_eq!(
+            build(&[setting(0x003012, 0x11)], 1).unwrap()[6..],
+            [0x12, 0x30, 0, 1, 0x11, 0]
+        );
+    }
+
+    #[test]
+    fn parses_mixed_width_power_frames_and_rejects_invalid_values() {
+        let items = [
+            setting(0x019662, 0x0102),
+            setting(0x019663, 63030),
+            setting(0x019666, 86399),
+            setting(0x019670, 2),
+        ];
+        let frame = iec104::i(0, 0, build(&items, 1).unwrap());
+        let parsed = iec104::parse(&frame);
+        assert!(parsed.error.is_none());
+        assert_eq!(parsed.objects.len(), 4);
+        assert_eq!(parsed.objects[0].ioa, 0x019662);
+        assert_eq!(parsed.objects[1].value, "63030");
+        assert_eq!(parsed.objects[2].value, "86399");
+        assert_eq!(parsed.objects[3].ioa, 0x019670);
+
         for (ioa, value) in [
-            (0x19044, 0),
-            (0x13114, 0),
-            (0x3000, 25),
-            (0x19000, 13),
-            (0x19017, -2501),
-            (0x19022, 4),
-            (0x19028, 0x183b),
-            (0x1902a, 60),
+            (0x019663, 86400),
+            (0x019621, 3),
+            (0x019621, 4),
+            (0x019660, 6),
+            (0x019631, 11001),
+            (0x019632, 5001),
+            (0x019624, 60),
+            (0x019624, 60 << 8),
+            (0x019661, 60),
+            (0x019622, -4001),
+            (0x019622, 1001),
+            (0x003011, 2),
+            (0x019000, 0),
+            (0x00300d, 0),
         ] {
             assert!(
-                build(&[setting(ioa, value)], 1, Some(1)).is_err(),
-                "{ioa:x}"
+                build(&[setting(ioa, value)], 1).is_err(),
+                "0x{ioa:06X}={value}"
             );
         }
-        assert!(build(&[setting(0x19007, 1200)], 1, None).is_err());
-        assert!(build(&[setting(0x19007, 1200)], 1, Some(2)).is_err());
-        assert!(build(&[setting(0x19006, 2), setting(0x19007, 2400)], 1, None).is_ok());
-        assert!(build(&[setting(0x1900d, 65535)], 1, None).is_ok()); // No invented voltage bound.
-        assert!(build(&[setting(0x19007, 1200)], 2, None).is_ok()); // Cancellation needs no fresh voltage.
-        assert!(build(&[setting(0x19000, 0); 0], 1, None).is_err());
-        assert!(build(&vec![setting(0x19000, 0); 17], 1, None).is_err());
-        assert!(build(&[setting(0x19000, 0)], 3, None).is_err());
+        assert!(build(&[setting(0x019663, 0)], 3).is_err());
+        assert!(build(&[setting(0x019663, 0); 0], 1).is_err());
+        assert!(build(&vec![setting(0x019610, 0); 17], 1).is_err());
+        assert!(build(&[setting(0x019610, 0), setting(0x01960f, 0)], 1).is_err());
+        assert!(build(&[setting(0x019610, 0), setting(0x019610, 0)], 1).is_err());
+        assert!(build(&[setting(0x003011, 0), setting(0x019610, 0)], 1).is_err());
+        assert!(build(
+            &[
+                setting(0x003011, 0),
+                setting(0x003012, 0),
+                setting(0x003012, 0)
+            ],
+            1
+        )
+        .is_err());
     }
 }

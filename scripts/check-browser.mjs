@@ -9,7 +9,7 @@ page.on("pageerror", (error) => errors.push(error.message));
 page.on("dialog", (dialog) => dialog.accept());
 const device = (callback, arg) => page.evaluate(callback, arg);
 const row = (text) => page.locator("tbody tr").filter({ hasText: text });
-const control = page.locator(".command").filter({ hasText: "打开门" });
+const control = page.locator(".command").filter({ hasText: "请求开门" });
 const expectEnabled = async (locator) => {
   await locator.click({ trial: true });
   assert.equal(await locator.isEnabled(), true);
@@ -19,7 +19,7 @@ try {
     `${process.env.UI_TEST_URL || "http://localhost:1421"}/tests/ui.html`,
   );
   await page.waitForFunction(
-    () => document.querySelectorAll("tbody tr").length === 281,
+    () => document.querySelectorAll("tbody tr").length === 183,
   );
   await page.screenshot({
     animations: "disabled",
@@ -41,7 +41,7 @@ try {
   );
   assert.equal(
     await page.getByLabel("波特率", { exact: true }).inputValue(),
-    "1000000",
+    "115200",
   );
   await page.getByLabel("波特率", { exact: true }).selectOption("115200");
   assert.equal(await page.locator("#serial-settings").count(), 0);
@@ -69,7 +69,7 @@ try {
     false,
   );
   await page.getByRole("button", { name: "站总召唤", exact: true }).click();
-  await page.getByText("281 / 281 已更新", { exact: true }).waitFor();
+  await page.getByText("183 / 183 已更新", { exact: true }).waitFor();
   assert.equal(
     await row("0x000017").locator(".point-value").innerText(),
     "正常",
@@ -126,10 +126,10 @@ try {
       .isEnabled(),
     false,
   );
-  assert.equal(await page.locator(".command").count(), 29);
+  assert.equal(await page.locator(".command").count(), 31);
   for (const [ioa, name, value, label] of [
-    [0x224, "使能门加热解冻", "ON", "已使能（导通）"],
-    [0x225, "关闭门加热", "OFF", "已关闭"],
+    [0x224, "使能门加热解冻输出", "ON", "已使能（导通）"],
+    [0x225, "关闭门加热输出", "OFF", "已关闭"],
   ]) {
     const heater = page.locator(".command").filter({ hasText: name });
     assert.equal(await heater.getByRole("button", { name: "执行", exact: true }).isEnabled(), false);
@@ -148,40 +148,47 @@ try {
     await row("0x000016").getByText("门加热解冻使能", { exact: true }).waitFor();
     await row("0x000016").getByText(label, { exact: true }).waitFor();
   }
-  const actuator = page.locator(".command").filter({ hasText: "万融 整机推出 停止" });
+  const actuator = page.locator(".command").filter({ hasText: "整机推出停止" });
   await actuator.getByRole("button", { name: "选择", exact: true }).click();
   await actuator.getByText("已确认选择 · 可执行").waitFor();
   await actuator.getByRole("button", { name: "执行", exact: true }).click();
-  await page.getByText("万融动作请求已接受；本协议无到位反馈，请现场核实。", {exact: true}).waitFor();
+  await page.getByText("机构动作请求已接受；本协议无运行或到位反馈，请现场核实。", {exact: true}).waitFor();
   await page.getByRole("button", { name: "参数设置" }).click();
-  assert.equal(await page.locator(".adjust").count(), 88);
+  assert.equal(await page.locator(".adjust").count(), 60);
   const parameter = (ioa) => page.locator(`#adjust-${ioa}`).locator("xpath=ancestor::section");
-  const temperature = parameter(0x19017);
-  await temperature.getByRole("spinbutton").fill("-100");
+  const temperature = parameter(0x19622);
+  await temperature.getByRole("spinbutton").fill("-1000");
   await temperature.getByRole("button", {name: "预置", exact: true}).click();
   await temperature.getByText("预置已确认", {exact: true}).waitFor();
   await temperature.getByRole("button", {name: "固化", exact: true}).click();
   await page.getByText("设备已接受参数写入请求；请稍后总召核对实际回传值。", {exact: true}).waitFor();
   assert.deepEqual(await device(() => window.testDevice.calls.filter((c) => c.cmd === "adjust_tis").at(-1).args),
-    {items: [{ioa: 0x19017, value: -100}], pi: 0});
-  const rtc = parameter(0x19019);
-  await rtc.getByRole("spinbutton").fill(String(0x2238));
-  assert.equal(await rtc.getByRole("button", {name: "预置", exact: true}).isEnabled(), false);
-  await parameter(0x1901a).getByRole("spinbutton").fill(String(0x1d0c));
-  await parameter(0x1901b).getByRole("spinbutton").fill(String(0x1a09));
-  await rtc.getByRole("button", {name: "预置", exact: true}).click();
-  await rtc.getByText("预置已确认", {exact: true}).waitFor();
-  await parameter(0x1901b).getByRole("spinbutton").fill(String(0x1a0a));
-  assert.equal(await rtc.getByRole("button", {name: "固化", exact: true}).isEnabled(), false);
-  await parameter(0x1901b).getByRole("spinbutton").fill(String(0x1a09));
-  await parameter(0x1901a).getByRole("button", {name: "固化", exact: true}).click();
+    {items: [{ioa: 0x19622, value: -1000}], pi: 0});
+  const timer = parameter(0x19663);
+  await timer.getByRole("spinbutton").fill("63030");
+  await timer.getByRole("button", {name: "预置", exact: true}).click();
+  await timer.getByText("预置已确认", {exact: true}).waitFor();
+  await timer.getByRole("spinbutton").fill("63031");
+  assert.equal(await timer.getByRole("button", {name: "固化", exact: true}).isEnabled(), false);
+  await timer.getByRole("spinbutton").fill("63030");
+  await timer.getByRole("button", {name: "固化", exact: true}).click();
   await page.getByText("设备已接受参数写入请求；请稍后总召核对实际回传值。", {exact: true}).waitFor();
   assert.deepEqual(await device(() => window.testDevice.calls.filter((c) => c.cmd === "adjust_tis").at(-1).args),
-    {items: [{ioa: 0x19019, value: 0x2238}, {ioa: 0x1901a, value: 0x1d0c}, {ioa: 0x1901b, value: 0x1a09}], pi: 0});
+    {items: [{ioa: 0x19663, value: 63030}], pi: 0});
+  const environment = parameter(0x3011);
+  assert.match(await environment.locator(".adjust-value").innerText(), /无回读/);
+  assert.equal(await row("0x003011").count(), 0);
+  await environment.getByRole("spinbutton").fill("1");
+  await environment.getByRole("button", {name: "预置", exact: true}).click();
+  await environment.getByText("预置已确认", {exact: true}).waitFor();
+  await environment.getByRole("button", {name: "固化", exact: true}).click();
+  await page.getByText("写入请求已接受；该环境校准参数无回读，请通过设备侧验证。", {exact: true}).waitFor();
+  assert.deepEqual(await device(() => window.testDevice.calls.filter((c) => c.cmd === "adjust").at(-1).args),
+    {ioa: 0x3011, value: 1, preset: false, cancel: false});
 
   const adjustment = page
     .locator(".adjust")
-    .filter({ hasText: "空调制冷启动温度阈值" });
+    .filter({ hasText: "制冷启动温度" });
   await adjustment.getByRole("spinbutton").fill("26");
   assert.equal(
     await adjustment

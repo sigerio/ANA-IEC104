@@ -123,7 +123,7 @@ export function Overview({ link }: { link: Link }) {
         </div>
         <div className="card-bottom">
           <span className={`dot ${read(0x1000) === "在线" ? "live" : ""}`} />
-          温湿度传感器<span>{read(0x1000)}</span>
+          气象设备<span>{read(0x1000)}</span>
         </div>
       </article>
     </section>

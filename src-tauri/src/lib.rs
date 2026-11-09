@@ -52,11 +52,8 @@ struct Protocol {
     unacknowledged: u16,
     state: ProtocolState,
     deadline: Option<Instant>,
-    i_deadline: Option<Instant>,
     last_activity: Instant,
     test_deadline: Option<Instant>,
-    tis_level: Option<i32>,
-    tis_voltage: Option<i32>,
 }
 
 impl Protocol {
@@ -69,20 +66,14 @@ impl Protocol {
             unacknowledged: 0,
             state: ProtocolState::Idle,
             deadline: None,
-            i_deadline: None,
             last_activity: Instant::now(),
             test_deadline: None,
-            tis_level: None,
-            tis_voltage: None,
         }
     }
     fn idle(&mut self) {
         self.state = ProtocolState::Idle;
         self.deadline = None;
-        self.i_deadline = None;
         self.test_deadline = None;
-        self.tis_level = None;
-        self.tis_voltage = None;
         self.unacknowledged = 0;
         // 会话复位即序号归零:下次 STARTDT 重新从 0 计数。
         self.ns = 0;
@@ -106,9 +97,6 @@ impl Protocol {
         }
         self.peer_nr = nr;
         self.unacknowledged -= advanced;
-        if self.unacknowledged == 0 {
-            self.i_deadline = None;
-        }
         Ok(())
     }
 
@@ -346,21 +334,14 @@ fn protocol_tick(protocol: &mut Protocol, now: Instant) -> (Option<Vec<u8>>, Opt
         protocol.idle();
         return (None, Some(message.into()));
     }
-    if protocol.i_deadline.is_some_and(|deadline| now >= deadline) {
-        protocol.stop(now);
-        return (
-            Some(iec104::u(0x13)),
-            Some("业务帧确认超时；已发送 STOPDT ACT 复位会话".into()),
-        );
-    }
     if protocol
         .test_deadline
         .is_some_and(|deadline| now >= deadline)
     {
-        protocol.stop(now);
+        protocol.test_deadline = None;
         return (
-            Some(iec104::u(0x13)),
-            Some("TESTFR 链路测试超时；已发送 STOPDT ACT 复位会话".into()),
+            None,
+            Some("TESTFR 链路测试确认超时；等待下一次链路空闲测试".into()),
         );
     }
     if protocol.state.started()
@@ -404,35 +385,6 @@ fn receive_frame(
                                 parsed.error = Some("ASDU 公共地址或源发地址不匹配".into());
                             }
                             accepted = parsed.error.is_none();
-                            if accepted && matches!(parsed.cot, Some(3 | 20)) {
-                                if parsed.ti == Some(13) {
-                                    for obj in &parsed.objects {
-                                        let value = obj
-                                            .value
-                                            .parse::<f32>()
-                                            .ok()
-                                            .filter(|v| {
-                                                v.is_finite()
-                                                    && v.fract() == 0.0
-                                                    && obj.quality == "正常"
-                                            })
-                                            .map(|v| v as i32);
-                                        match obj.ioa {
-                                            0x19006 => protocol.tis_level = value,
-                                            0x1311d => protocol.tis_voltage = value,
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                if parsed.ti == Some(1)
-                                    && parsed.objects.iter().any(|o| {
-                                        o.ioa == 0x1100f && (o.value != "ON" || o.quality != "正常")
-                                    })
-                                {
-                                    protocol.tis_level = None;
-                                    protocol.tis_voltage = None;
-                                }
-                            }
                         }
                         Err(error) => {
                             protocol.stop(Instant::now());
@@ -743,9 +695,6 @@ fn send_i(app: &AppHandle, state: &State<'_, AppState>, asdu: Vec<u8>) -> Result
         if result.is_ok() {
             protocol.ns = (protocol.ns + 1) % 32_768;
             protocol.unacknowledged += 1;
-            if protocol.unacknowledged == 1 {
-                protocol.i_deadline = Some(Instant::now() + T1);
-            }
             protocol.last_activity = Instant::now();
         }
         (frame, result)
@@ -799,13 +748,13 @@ fn adjust(
 ) -> Result<(), String> {
     if adjust_value_is_invalid(ioa, value, preset, cancel) {
         return Err(
-            "遥调参数无效：请检查该点允许范围与步进；模式为 0–3，传感器校正为 -10～10 / 0.01；预置与取消不可同时选择"
+            "遥调参数无效：请检查该点允许范围；空调浮点值按 0.1 向零截断校验，模式为 0–3，环境校准为 UINT16 整数；预置与取消不可同时选择"
                 .into(),
         );
     }
     let pi = (preset as u8) | ((cancel as u8) << 1);
     let mut data = vec![pi];
-    if ioa == 0x300c {
+    if ioa == 0x300c || tis::is_environment(ioa) {
         data.extend_from_slice(&(value as u16).to_le_bytes());
     } else {
         data.extend_from_slice(&value.to_le_bytes());
@@ -820,46 +769,47 @@ fn adjust_tis(
     items: Vec<tis::Setting>,
     pi: u8,
 ) -> Result<(), String> {
-    let connection = current_connection(&state)?;
-    let level = {
-        let protocol = connection.protocol.lock().unwrap();
-        protocol
-            .tis_level
-            .filter(|n| (1..=4).contains(n))
-            .or_else(|| {
-                protocol
-                    .tis_voltage
-                    .filter(|v| matches!(v, 12 | 24 | 36 | 48))
-                    .map(|v| v / 12)
-            })
-    };
-    send_i(&app, &state, tis::build(&items, pi, level)?)
+    send_i(&app, &state, tis::build(&items, pi)?)
 }
 
 fn adjust_value_is_invalid(ioa: u32, value: f32, preset: bool, cancel: bool) -> bool {
-    if !value.is_finite() || !(0x3000..=0x3010).contains(&ioa) || (preset && cancel) {
+    if !value.is_finite() || (preset && cancel) {
+        return true;
+    }
+    if tis::is_environment(ioa) {
+        if value.fract() != 0.0 {
+            return true;
+        }
+        return match ioa {
+            0x003011 => !(0.0..=1.0).contains(&value),
+            0x003012 => !(0.0..=65535.0).contains(&value),
+            _ => true,
+        };
+    }
+    if !(0x3000..=0x300c).contains(&ioa) {
         return true;
     }
     if ioa == 0x300c {
         return !(0.0..=3.0).contains(&value) || value.fract() != 0.0;
     }
-    if ioa >= 0x300d {
-        return !(-10.0..=10.0).contains(&value)
-            || ((value * 100.0).round() - value * 100.0).abs() > 0.001;
-    }
     if ioa == 0x300b {
         return !(-3276.0..=3276.0).contains(&value) || value.fract() != 0.0;
     }
+    if !(-3276.8..=3276.7).contains(&value) {
+        return true;
+    }
+    // V3.3 先乘 10 向零截断，再按对应的原始寄存器范围校验。
+    let scaled = (value * 10.0).trunc() as i32;
     let (min, max) = match ioa {
-        0x3000 => (20.0, 55.0),
-        0x3001 => (15.0, 35.0),
-        0x3002 => (-30.0, 15.0),
-        0x3003 => (0.0, 23.0),
-        0x3004 => (30.0, 60.0),
-        0x3005 => (-10.0, 10.0),
-        _ => (-3276.8, 3276.7),
+        0x3000 => (200, 550),
+        0x3001 => (150, 350),
+        0x3002 => (-300, 150),
+        0x3003 => (0, 230),
+        0x3004 => (300, 600),
+        0x3005 => (-100, 100),
+        _ => (-32768, 32767),
     };
-    !(min..=max).contains(&value) || ((value * 10.0).round() - value * 10.0).abs() > 0.001
+    !(min..=max).contains(&scaled)
 }
 
 pub fn run() {
@@ -890,7 +840,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_timeouts_send_stopdt_before_resetting() {
+    fn session_timeouts_follow_v33_without_i_frame_reset() {
         let now = Instant::now();
         let mut protocol = Protocol::new();
         protocol.state = ProtocolState::WaitingStart;
@@ -902,15 +852,22 @@ mod tests {
         assert_eq!(protocol.state, ProtocolState::Idle);
 
         protocol.state = ProtocolState::Started;
-        protocol.i_deadline = Some(now - Duration::from_secs(1));
-        assert_eq!(protocol_tick(&mut protocol, now).0, Some(iec104::u(0x13)));
-        assert_eq!(protocol.state, ProtocolState::WaitingStop);
+        protocol.unacknowledged = 1;
+        protocol.last_activity = now;
+        assert_eq!(protocol_tick(&mut protocol, now + T1), (None, None));
+        assert_eq!(protocol.state, ProtocolState::Started);
+        assert_eq!(protocol.unacknowledged, 1);
 
         protocol = Protocol::new();
         protocol.state = ProtocolState::Started;
         protocol.last_activity = now - T3;
         assert_eq!(protocol_tick(&mut protocol, now).0, Some(iec104::u(0x43)));
         assert_eq!(protocol.state, ProtocolState::Started);
+        protocol.last_activity = now;
+        assert!(protocol.test_deadline.is_some());
+        assert_eq!(protocol_tick(&mut protocol, now + T1).0, None);
+        assert_eq!(protocol.state, ProtocolState::Started);
+        assert!(protocol.test_deadline.is_none());
     }
 
     #[test]
@@ -940,35 +897,36 @@ mod tests {
         assert!(adjust_value_is_invalid(0x300c, -1.0, true, false));
         assert!(adjust_value_is_invalid(0x300c, 4.0, true, false));
         assert!(adjust_value_is_invalid(0x3000, 3276.8, true, false));
-        assert!(adjust_value_is_invalid(0x300d, 10.01, true, false));
-        assert!(adjust_value_is_invalid(0x300d, 1.234, true, false));
-        assert!(adjust_value_is_invalid(0x3011, 1.0, true, false));
+        assert!(adjust_value_is_invalid(0x300d, 1.0, true, false));
+        assert!(adjust_value_is_invalid(0x3010, 1.0, true, false));
+        assert!(!adjust_value_is_invalid(0x3011, 1.0, true, false));
+        assert!(adjust_value_is_invalid(0x3011, 2.0, true, false));
+        assert!(!adjust_value_is_invalid(0x3012, 17.0, true, false));
+        assert!(adjust_value_is_invalid(0x3012, 1.5, true, false));
         assert!(adjust_value_is_invalid(0x300c, 1.0, true, true));
         assert!(!adjust_value_is_invalid(0x300c, 1.0, true, false));
         assert!(!adjust_value_is_invalid(0x3006, -3276.8, true, false));
+        assert!(!adjust_value_is_invalid(0x3006, 1.25, true, false));
         assert!(adjust_value_is_invalid(0x3000, 19.9, true, false));
         assert!(!adjust_value_is_invalid(0x3000, 20.0, true, false));
+        assert!(!adjust_value_is_invalid(0x3000, 20.12, true, false));
+        assert!(!adjust_value_is_invalid(0x3000, 55.09, true, false));
+        assert!(adjust_value_is_invalid(0x3000, 55.1, true, false));
         assert!(adjust_value_is_invalid(0x300b, 1.5, true, false));
-        assert!(adjust_value_is_invalid(0x3006, 1.25, true, false));
-        assert!(!adjust_value_is_invalid(0x300d, -10.0, true, false));
-        assert!(!adjust_value_is_invalid(0x3010, 1.25, true, false));
     }
 
     #[test]
     fn accepts_only_configured_control_points() {
-        assert!(control_ioa_is_valid(0x220));
-        assert!(control_ioa_is_valid(0x221));
-        assert!(control_ioa_is_valid(0x222));
-        assert!(control_ioa_is_valid(0x224));
-        assert!(control_ioa_is_valid(0x225));
-        for ioa in [0x230, 0x232, 0x238, 0x300, 0x307, 0x30e, 0x313] {
-            assert!(control_ioa_is_valid(ioa));
+        for ioa in [
+            0x200, 0x201, 0x210, 0x211, 0x220, 0x221, 0x222, 0x223, 0x224, 0x225, 0x230, 0x231,
+            0x232, 0x233, 0x234, 0x235, 0x236, 0x237, 0x238, 0x240, 0x241, 0x500, 0x501, 0x502,
+            0x503, 0x50c, 0x50d, 0x510, 0x511, 0x51a, 0x51b,
+        ] {
+            assert!(control_ioa_is_valid(ioa), "0x{ioa:06X}");
         }
-        for ioa in [0x239, 0x302, 0x308, 0x314] {
-            assert!(!control_ioa_is_valid(ioa));
+        for ioa in [0x239, 0x300, 0x307, 0x30e, 0x313, 0x226, 0x16, 0x504] {
+            assert!(!control_ioa_is_valid(ioa), "0x{ioa:06X}");
         }
-        assert!(!control_ioa_is_valid(0x226));
-        assert!(!control_ioa_is_valid(0x16));
     }
 
     #[test]

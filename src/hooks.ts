@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { commandText, getPoints, getStatus, listPorts, send } from "./api";
-import { adjustmentError, adjustmentGroup, parameterReplyMatches, now, showIoa } from "./format";
+import { adjustmentError, adjustmentGroup, isPowerAdjustment, isRawAdjustment, parameterReplyMatches, now, showIoa } from "./format";
 import type { Frame, Point, Raw, Status, Value } from "./types";
 
 const INITIAL_STATUS: Status = {
@@ -24,7 +24,7 @@ type Pending = {
 export function useLink() {
   const [ports, setPorts] = useState<string[]>([]);
   const [port, setPort] = useState("");
-  const [baudRate, setBaudRate] = useState(1000000);
+  const [baudRate, setBaudRate] = useState(115200);
   const [status, setStatus] = useState<Status>(INITIAL_STATUS);
   const [points, setPoints] = useState<Point[]>([]);
   const [values, setValues] = useState<Record<number, Value>>({});
@@ -54,7 +54,7 @@ export function useLink() {
     setStatus(next);
     if (next.serialConnected && next.port) {
       setPort(next.port);
-      setBaudRate(next.baudRate || 1000000);
+      setBaudRate(next.baudRate || 115200);
     }
     if (!next.started) {
       setSelected(null);
@@ -130,7 +130,7 @@ export function useLink() {
     if (
       !select &&
       !window.confirm(
-        `确认执行「${name}」？\n${ioa >= 0x230 && ioa <= 0x238 ? "万融无运行或到位反馈；请求接受不代表动作成功，请现场核实。" : "请求接受不代表动作成功，请核对设备回传。"}`,
+        `确认执行「${name}」？\n${ioa >= 0x230 && ioa <= 0x238 ? "推出、升降与太阳板机构无运行或到位反馈；请求接受不代表动作成功，请现场核实。" : ioa === 0x240 ? "风速调零无完成反馈；执行后请等待 10 秒，超时不要重复调零。" : ioa === 0x241 ? "雨量调零无完成反馈；请求接受不代表校准完成，超时不要重复调零。" : "请求接受不代表动作成功，请核对设备回传。"}`,
       )
     )
       return;
@@ -166,17 +166,17 @@ export function useLink() {
       }
     }
     if (items.some((p) => p.value === undefined)) return;
-    if (!preset && !cancel && items.some((p) => presets[p.ioa] !== p.value)) {
+    if (!preset && !cancel && items.some((p) => !Object.is(presets[p.ioa], p.value))) {
       setError("请先预置整组当前数值并等待确认");
       return;
     }
     if (!preset && !cancel && !window.confirm(
-      `确认固化以下参数？\n${items.map((p) => `${points.find((point) => point.ioa === p.ioa)?.name} = ${p.value}${ioa >= 0x19000 ? "（原始码）" : ""}`).join("\n")}`,
+      `确认固化以下参数？\n${items.map((p) => `${points.find((point) => point.ioa === p.ioa)?.name} = ${p.value}${isRawAdjustment(p.ioa) ? "（原始码）" : ""}`).join("\n")}`,
     )) return;
     // 一次只保留一组许可，避免旧参数集合与新预置混用。
     setPresets({});
     updatePending({ ioa, action: cancel ? "取消" : preset ? "预置" : "固化", items, deadline: Date.now() + 15000 });
-    if (ioa >= 0x19000) await run("adjust_tis", { items, pi: cancel ? 2 : preset ? 1 : 0 });
+    if (isPowerAdjustment(ioa)) await run("adjust_tis", { items, pi: cancel ? 2 : preset ? 1 : 0 });
     else await run("adjust", { ioa, value: items[0].value, preset, cancel });
   };
 
@@ -223,7 +223,7 @@ export function useLink() {
             )
               return;
             if (
-              ["M_SP_NA_1", "M_DP_NA_1", "M_ME_NC_1"].includes(frame.ti_name) &&
+              ["M_SP_NA_1", "M_ME_NC_1"].includes(frame.ti_name) &&
               frame.cot !== null &&
               (frame.cot & 0xc0) === 0
             ) {
@@ -288,9 +288,17 @@ export function useLink() {
               setPresets({});
             setNotice(
               request.action === "执行"
-                ? (request.ioa >= 0x230 && request.ioa <= 0x238 ? "万融动作请求已接受；本协议无到位反馈，请现场核实。" : "设备已接受动作请求，请通过遥信确认实际结果。")
+                ? request.ioa >= 0x230 && request.ioa <= 0x238
+                  ? "机构动作请求已接受；本协议无运行或到位反馈，请现场核实。"
+                  : request.ioa === 0x240
+                    ? "风速调零请求已接受；无完成反馈，请等待 10 秒并避免重复调零。"
+                    : request.ioa === 0x241
+                      ? "雨量调零请求已接受；无完成反馈，请避免超时重复调零。"
+                      : "设备已接受动作请求，请通过遥信确认实际结果。"
                 : request.action === "固化"
-                  ? "设备已接受参数写入请求；请稍后总召核对实际回传值。"
+                  ? request.items?.some((item) => item.ioa === 0x3011 || item.ioa === 0x3012)
+                    ? "写入请求已接受；该环境校准参数无回读，请通过设备侧验证。"
+                    : "设备已接受参数写入请求；请稍后总召核对实际回传值。"
                   : `${request.action}已确认${request.action === "选择" ? "，可执行该控制点" : ""}。`,
             );
           }),

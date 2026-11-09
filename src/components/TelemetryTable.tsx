@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { isAbnormal, isUsable, pointValue, showIoa } from "../format";
+import { isAbnormal, isTimerAdjustment, isUsable, pointValue, showIoa } from "../format";
 import type { Link } from "../hooks";
 
 export function TelemetryTable({ link }: { link: Link }) {
@@ -8,7 +8,7 @@ export function TelemetryTable({ link }: { link: Link }) {
   const [query, setQuery] = useState("");
   const [abnormalOnly, setAbnormalOnly] = useState(false);
   const telemetry = useMemo(
-    () => points.filter((p) => p.kind !== "遥控"),
+    () => points.filter((p) => p.kind !== "遥控" && p.readback !== false),
     [points],
   );
   const filtered = telemetry.filter(
@@ -108,7 +108,7 @@ export function TelemetryTable({ link }: { link: Link }) {
                     className={`point-value ${!valid ? "muted" : abnormal ? "alarm-text" : ""}`}
                   >
                     {pointValue(p, value)}
-                    {value && ![0x100, 0x101, 0x300c].includes(p.ioa) && (
+                    {value && ![0x100, 0x101, 0x300c].includes(p.ioa) && !isTimerAdjustment(p.ioa) && (
                       <small>{p.unit}</small>
                     )}
                   </td>
